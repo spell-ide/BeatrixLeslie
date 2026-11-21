@@ -64,8 +64,14 @@ function Find-WinDeployQt {
 function Invoke-WinDeployQtOnTarget {
     param([string]$WinDeployQtExe, [string]$TargetExe, [string]$Config)
     $ModeFlag = if ($Config -eq "Debug") { "--debug" } else { "--release" }
-    Write-Host "==> Running windeployqt ($ModeFlag) on $TargetExe"
-    & $WinDeployQtExe $ModeFlag --no-translations --compiler-runtime $TargetExe
+    $TargetDir = Split-Path -Parent $TargetExe
+    $DeployInputs = @($TargetExe)
+    $QsciDlls = @(Get-ChildItem -Path $TargetDir -Filter "qscintilla2*.dll" -File -ErrorAction SilentlyContinue)
+    foreach ($QsciDll in $QsciDlls) {
+        $DeployInputs += $QsciDll.FullName
+    }
+    Write-Host "==> Running windeployqt ($ModeFlag) on $($DeployInputs -join ', ')"
+    & $WinDeployQtExe $ModeFlag --no-translations --compiler-runtime @DeployInputs
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
     }
@@ -107,6 +113,21 @@ function Test-WindowsRuntimeLayout {
         }
         if (-not $FoundQtWidgets) {
             throw "Loader verification failed: missing Qt6Widgets.dll alongside '$TargetExe' after -DeployQt."
+        }
+
+        $QtPrintCandidates = @(
+            (Join-Path $TargetDir "Qt6PrintSupport.dll"),
+            (Join-Path $TargetDir "Qt6PrintSupportd.dll")
+        )
+        $FoundQtPrint = $false
+        foreach ($QtPrintCand in $QtPrintCandidates) {
+            if (Test-Path -LiteralPath $QtPrintCand -PathType Leaf) {
+                $FoundQtPrint = $true
+                break
+            }
+        }
+        if (-not $FoundQtPrint) {
+            throw "Loader verification failed: missing Qt6PrintSupport.dll (required by QScintilla2) alongside '$TargetExe' after -DeployQt."
         }
     }
 

@@ -36,9 +36,9 @@ The working directory and recent output are attached. The agent picks it up from
 | Platform | Toolchain |
 | :-- | :-- |
 | macOS 14+ | Xcode CLT, Rust, `brew install cmake qtbase qtsvg qscintilla2` |
-| Ubuntu / Debian | `build-essential cmake qt6-base-dev qt6-svg-dev libqscintilla2-qt6-dev libsecret-1-dev`, Rust |
-| Fedora | `gcc-c++ cmake qt6-qtbase-devel qt6-qtsvg-devel qscintilla-qt6-devel libsecret-devel`, Rust |
-| Arch | `base-devel cmake qt6-base qt6-svg qscintilla-qt6 libsecret`, Rust |
+| Ubuntu / Debian | `build-essential cmake pkg-config qt6-base-dev qt6-svg-dev libqscintilla2-qt6-dev libdbus-1-dev libsecret-1-dev`, Rust |
+| Fedora | `gcc-c++ cmake pkgconf-pkg-config qt6-qtbase-devel qt6-qtsvg-devel qscintilla-qt6-devel dbus-devel libsecret-devel`, Rust |
+| Arch | `base-devel cmake pkgconf qt6-base qt6-svg qscintilla-qt6 dbus libsecret`, Rust |
 | Windows 10/11 | Visual Studio 2022 (C++), Rust (MSVC), `vcpkg install qtbase qtsvg qscintilla` |
 
 Rust: https://rustup.rs

@@ -1,0 +1,42 @@
+# Build & install directories
+build/
+build-*/
+dist/
+cmake-build-*/
+Testing/
+
+# Rust build artifacts
+rust/**/target/
+
+# Compiler & CMake metadata
+compile_commands.json
+.cache/
+*.o
+*.obj
+*.pdb
+*.ilk
+*.exp
+
+# Runtime databases, logs & secrets
+*.sqlite3*
+*.log
+*.jsonl
+.env
+.env.*
+
+# Packaging artifacts
+*.dmg
+*.AppImage
+
+# OS, Python & editor metadata
+__pycache__/
+*.py[cod]
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+.claude/
+.spell/

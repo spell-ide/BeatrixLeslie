@@ -1,0 +1,140 @@
+{
+  "schema_version": "alarms_header_v1",
+  "thread_id": "thread-golden-v1",
+  "initial_messages": [
+    {
+      "role": "system",
+      "content": "You are an autonomous coding assistant running in Spell IDE."
+    },
+    {
+      "role": "user",
+      "content": "Run the cargo test suite and monitor both background timers."
+    },
+    {
+      "role": "assistant",
+      "content": "Running cargo test now.",
+      "reasoning_content": "Dispatching run_terminal_command to verify the workspace test suite.",
+      "tool_calls": [
+        {
+          "id": "call_golden_01",
+          "type": "function",
+          "function": {
+            "name": "run_terminal_command",
+            "arguments": "{\"command\":\"cargo test\"}"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "test result: ok. 42 passed; 0 failed; 0 ignored",
+      "tool_call_id": "call_golden_01",
+      "name": "run_terminal_command"
+    },
+    {
+      "role": "assistant",
+      "content": "Awaiting final timer confirmation."
+    }
+  ],
+  "due_alarms": [
+    {
+      "timer_id": "tmr_golden_01",
+      "thread_id": "thread-golden-v1",
+      "label": "compile-watch",
+      "note": "Verify cargo test compilation finished cleanly",
+      "duration_s": 5.0,
+      "created_at": 1762545600.0,
+      "fire_at": 1762545605.0,
+      "fired_at": 1762545605.0,
+      "elapsed_s": 5.0,
+      "remaining_s": 0.0,
+      "status": "fired",
+      "delivered": false
+    },
+    {
+      "timer_id": "tmr_golden_02",
+      "thread_id": "thread-golden-v1",
+      "label": "telemetry-audit",
+      "note": "Check alarm placement parity in Spell IDE",
+      "duration_s": 10.0,
+      "created_at": 1762545600.0,
+      "fire_at": 1762545610.0,
+      "fired_at": 1762545610.0,
+      "elapsed_s": 10.0,
+      "remaining_s": 0.0,
+      "status": "fired",
+      "delivered": false
+    }
+  ],
+  "expected_alarms_json": [
+    "[SPELL AGENT TIMER ALARM FIRED]\nThe following 1 scheduled agent timer alarm(s) have fired:\n  [1] timer_id=tmr_golden_01 | label='compile-watch' | requested=5.0s | elapsed=5.0s\n      Alarm Note / Checklist: Verify cargo test compilation finished cleanly\n[/SPELL AGENT TIMER ALARM FIRED]",
+    "[SPELL AGENT TIMER ALARM FIRED]\nThe following 1 scheduled agent timer alarm(s) have fired:\n  [1] timer_id=tmr_golden_02 | label='telemetry-audit' | requested=10.0s | elapsed=10.0s\n      Alarm Note / Checklist: Check alarm placement parity in Spell IDE\n[/SPELL AGENT TIMER ALARM FIRED]"
+  ],
+  "expected_alarms_meta_json": [
+    {
+      "id": "tmr_golden_01",
+      "timer_id": "tmr_golden_01",
+      "message": "Verify cargo test compilation finished cleanly",
+      "prompt": "Verify cargo test compilation finished cleanly",
+      "note": "Verify cargo test compilation finished cleanly",
+      "label": "compile-watch",
+      "thread_id": "thread-golden-v1",
+      "duration_s": 5.0,
+      "remaining_s": 0.0,
+      "status": "delivered",
+      "delivered": true,
+      "fired_at_unix_ms": 1762545605000,
+      "banner_text": "[SPELL AGENT TIMER ALARM FIRED]\nThe following 1 scheduled agent timer alarm(s) have fired:\n  [1] timer_id=tmr_golden_01 | label='compile-watch' | requested=5.0s | elapsed=5.0s\n      Alarm Note / Checklist: Verify cargo test compilation finished cleanly\n[/SPELL AGENT TIMER ALARM FIRED]"
+    },
+    {
+      "id": "tmr_golden_02",
+      "timer_id": "tmr_golden_02",
+      "message": "Check alarm placement parity in Spell IDE",
+      "prompt": "Check alarm placement parity in Spell IDE",
+      "note": "Check alarm placement parity in Spell IDE",
+      "label": "telemetry-audit",
+      "thread_id": "thread-golden-v1",
+      "duration_s": 10.0,
+      "remaining_s": 0.0,
+      "status": "delivered",
+      "delivered": true,
+      "fired_at_unix_ms": 1762545610000,
+      "banner_text": "[SPELL AGENT TIMER ALARM FIRED]\nThe following 1 scheduled agent timer alarm(s) have fired:\n  [1] timer_id=tmr_golden_02 | label='telemetry-audit' | requested=10.0s | elapsed=10.0s\n      Alarm Note / Checklist: Check alarm placement parity in Spell IDE\n[/SPELL AGENT TIMER ALARM FIRED]"
+    }
+  ],
+  "expected_patched_messages": [
+    {
+      "role": "system",
+      "content": "You are an autonomous coding assistant running in Spell IDE."
+    },
+    {
+      "role": "user",
+      "content": "Run the cargo test suite and monitor both background timers."
+    },
+    {
+      "role": "assistant",
+      "content": "Running cargo test now.",
+      "reasoning_content": "Dispatching run_terminal_command to verify the workspace test suite.",
+      "tool_calls": [
+        {
+          "id": "call_golden_01",
+          "type": "function",
+          "function": {
+            "name": "run_terminal_command",
+            "arguments": "{\"command\":\"cargo test\"}"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "test result: ok. 42 passed; 0 failed; 0 ignored\n\n[SPELL AGENT TIMER ALARM FIRED]\nThe following 1 scheduled agent timer alarm(s) have fired:\n  [1] timer_id=tmr_golden_01 | label='compile-watch' | requested=5.0s | elapsed=5.0s\n      Alarm Note / Checklist: Verify cargo test compilation finished cleanly\n[/SPELL AGENT TIMER ALARM FIRED]\n\n[SPELL AGENT TIMER ALARM FIRED]\nThe following 1 scheduled agent timer alarm(s) have fired:\n  [1] timer_id=tmr_golden_02 | label='telemetry-audit' | requested=10.0s | elapsed=10.0s\n      Alarm Note / Checklist: Check alarm placement parity in Spell IDE\n[/SPELL AGENT TIMER ALARM FIRED]",
+      "tool_call_id": "call_golden_01",
+      "name": "run_terminal_command"
+    },
+    {
+      "role": "assistant",
+      "content": "Awaiting final timer confirmation."
+    }
+  ]
+}

@@ -15,8 +15,8 @@ inline constexpr const char* kSpellFileUrlScheme = "spellfile";
  *
  * - `start` and `length` are UTF-16 code unit offsets into the input `QString`.
  * - `rawText` is the exact matched substring.
- * - `filePath` is the resolved absolute path (when matched against `projectRoots`,
- *   `.spell/research_cache/`, or `.beatrix/research_cache/`) or normalized relative path.
+ * - `filePath` is the resolved absolute path (when matched against `projectRoots`
+ *   or `.spell/research_cache/`) or normalized relative path.
  * - `startLine` and `endLine` are 1-based line numbers (`0` when no line number was cited).
  */
 struct FileCitation {
@@ -32,9 +32,8 @@ struct FileCitation {
 
 /**
  * Scans `text` for file citations such as `src/foo.cpp:42`, `src/foo.cpp:L12-L30`,
- * `src/foo.cpp#L12`, `src/foo.cpp (L12-L30)`, `.spell/research_cache/...`, and
- * `.beatrix/research_cache/...`, resolving relative paths against `projectRoots`
- * when present.
+ * `src/foo.cpp#L12`, `src/foo.cpp (L12-L30)`, and `.spell/research_cache/...`,
+ * resolving relative paths against `projectRoots` when present.
  */
 QVector<FileCitation> findCitations(const QString& text,
                                     const QStringList& projectRoots = {});
@@ -43,7 +42,7 @@ QVector<FileCitation> findCitations(const QString& text,
  * Rewrites HTML-escaped prose (`escapedHtml`) so recognized file citations become
  * clickable links of the form `<a href="spellfile:///abs/path#L12">...</a>`
  * (or without `#L...` when no line is specified), matching both workspace paths
- * resolved via `projectRoots` and `.spell/research_cache/` or `.beatrix/research_cache/`.
+ * resolved via `projectRoots` and `.spell/research_cache/`.
  *
  * Existing HTML tags, anchor elements (`<a ...>...</a>`), and `<pre>...</pre>`
  * blocks are preserved untouched.

@@ -33,7 +33,9 @@
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <optional>
+#include <utility>
 
 namespace spell {
 

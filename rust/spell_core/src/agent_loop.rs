@@ -99,45 +99,6 @@ fn sanitize_wire_tool_call_args_for_jinja(tc: &mut WireToolCall) {
     }
 }
 
-/// Appends a secret-safe structured JSONL trace entry to `SPELL_AGENT_TRACE_LOG` when set.
-fn append_agent_trace_jsonl(event: &str, payload: Value) {
-    let Ok(raw_path) = std::env::var("SPELL_AGENT_TRACE_LOG") else {
-        return;
-    };
-    let path = raw_path.trim();
-    if path.is_empty() {
-        return;
-    }
-    let ts_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
-    let record = json!({
-        "ts_unix_ms": ts_ms,
-        "event": event,
-        "data": payload,
-    });
-    if let Ok(mut line) = serde_json::to_string(&record) {
-        line.push('\n');
-        if let Some(parent) = Path::new(path).parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(path) {
-            let _ = std::io::Write::write_all(&mut f, line.as_bytes());
-        }
-    }
-}
-
-fn preview_chars(raw: &str, max_chars: usize) -> String {
-    let total = raw.chars().count();
-    if total <= max_chars {
-        raw.to_string()
-    } else {
-        let head: String = raw.chars().take(max_chars).collect();
-        format!("{head}… (+{} chars)", total - max_chars)
-    }
-}
-
 /// Returns `true` if `msg` contains `<untrusted_external_content` in `content`, `reasoning_content`,
 /// or any serialized `tool_calls` entry (`Catch #2` Gatekeeper Critic isolation).
 pub(crate) fn wire_message_contains_untrusted_web(msg: &WireMessage) -> bool {
@@ -888,7 +849,7 @@ pub fn rollback_to_git_loop_snapshot(
 /// Transient runtime snapshot of the recent main-turn wire prefix (`messages`, `tools`, `cache_key`)
 /// shared cleanly with subagent tasks on the active thread.
 #[derive(Clone, Debug)]
-struct LastSlot0PrefixSnapshot {
+struct LastPrefixSnapshot {
     thread_id: String,
     cache_key: String,
     messages: Vec<WireMessage>,
@@ -1067,7 +1028,7 @@ pub struct SpellCoreSession {
     pub last_git_snapshot_sha: Option<String>,
     /// Whether live `edit_file` and `write_file` tool calls stage into `snapshot_store` (`Stage-Write` shadow overlay) instead of writing directly to disk (`G5` & `G13`).
     pub stage_write_mode: bool,
-    /// Monotonic Slot 1 timer wakeup tick sequence counter (`G8` & `G13`).
+    /// Monotonic background timer wakeup tick sequence counter.
     pub timer_tick_seq: u64,
     /// Active workspace root directory (`G15`).
     pub workspace_root: std::path::PathBuf,
@@ -1076,15 +1037,15 @@ pub struct SpellCoreSession {
     /// Active steering directive IDs toggled on in Settings (`#steer:<id>`).
     pub active_steering_ids: Vec<String>,
     /// Whether optional LLM-backed Gatekeeper Critic evaluation is enabled (defaults to `false`).
-    pub slot2_critic_enabled: bool,
-    /// Monotonic sequence number for Gatekeeper Critic reviews (`slot2:<tid>:review_<seq>`).
+    pub critic_enabled: bool,
+    /// Monotonic sequence number for Gatekeeper Critic reviews (`critic:<tid>:review_<seq>`).
     pub critic_review_seq: u64,
     /// Bounded cache (`<= 64`) of coding proposals emitted by `delegate_coding_subagent` (`prop-1`, `prop-2`, ...).
     pub proposal_cache: VecDeque<SubagentCodingProposal>,
     /// Monotonic sequence counter for `proposal_id` assignment (`prop-1`, `prop-2`, ...).
     pub next_proposal_seq: u64,
     /// Transient runtime snapshot of the recent wire prefix on the active thread.
-    last_slot0_prefix: Option<LastSlot0PrefixSnapshot>,
+    last_prefix_snapshot: Option<LastPrefixSnapshot>,
     /// Gated Online Research configuration (`OnlineResearchMode::Offline` fail-closed default).
     pub online_research_config: crate::online_fetch::OnlineResearchConfig,
     /// Thread IDs that have ingested untrusted external web/research content.
@@ -1230,16 +1191,10 @@ impl SpellCoreSession {
         let initial_model_id = persisted_ep.model_id.trim().to_string();
         let initial_subagent_model_id = persisted_ep.subagent_model_id.trim().to_string();
 
-        let slot2_critic_enabled = storage
+        let critic_enabled = storage
             .get_kv_document("settings", "critic_enabled")
             .ok()
             .flatten()
-            .or_else(|| {
-                storage
-                    .get_kv_document("settings", "slot2_critic_enabled")
-                    .ok()
-                    .flatten()
-            })
             .map(|raw| matches!(raw.trim().to_ascii_lowercase().as_str(), "true" | "1" | "yes"))
             .unwrap_or(false);
 
@@ -1329,11 +1284,11 @@ impl SpellCoreSession {
             workspace_root: primary_root,
             message_terminal,
             active_steering_ids: Vec::new(),
-            slot2_critic_enabled,
+            critic_enabled,
             critic_review_seq: 0,
             proposal_cache: VecDeque::new(),
             next_proposal_seq: 0,
-            last_slot0_prefix: None,
+            last_prefix_snapshot: None,
             online_research_config,
             web_tainted_threads: HashSet::new(),
             workspace_read_threads: HashSet::new(),
@@ -1450,7 +1405,7 @@ impl SpellCoreSession {
 
         if endpoint_changed {
             *self.engine_status.lock() = EngineStatusCache::default();
-            self.last_slot0_prefix = None;
+            self.last_prefix_snapshot = None;
         }
         self.persist_endpoint_config();
         Ok(())
@@ -1462,18 +1417,11 @@ impl SpellCoreSession {
     }
 
     /// Enables or disables optional LLM-backed Gatekeeper Critic review, persisting in SQLite.
-    pub fn set_slot2_critic_enabled(&mut self, enabled: bool) -> Result<(), String> {
-        self.slot2_critic_enabled = enabled;
+    pub fn set_critic_enabled(&mut self, enabled: bool) -> Result<(), String> {
+        self.critic_enabled = enabled;
         let val = if enabled { "true" } else { "false" };
         self.storage
-            .put_kv_document("settings", "slot2_critic_enabled", val)?;
-        self.storage
             .put_kv_document("settings", "critic_enabled", val)
-    }
-
-    /// Alias for [`Self::set_slot2_critic_enabled`].
-    pub fn set_critic_enabled(&mut self, enabled: bool) -> Result<(), String> {
-        self.set_slot2_critic_enabled(enabled)
     }
 
     /// Probes `GET /models` against either explicit `base_url_override`/`api_key_override`
@@ -1878,7 +1826,7 @@ impl SpellCoreSession {
     /// Constructs a web-scrubbed prompt for Gatekeeper Critic (`Catch #2`),
     /// truncating the cloned prefix strictly before the first message whose content,
     /// reasoning, or tool calls contains `<untrusted_external_content`.
-    pub(crate) fn build_slot2_critic_subagent_prompt(
+    pub(crate) fn build_critic_subagent_prompt(
         &self,
         thread_id: &str,
         fallback_epoch: u64,
@@ -1908,11 +1856,11 @@ impl SpellCoreSession {
         const SUBAGENT_HANDOFF_MARKER: &str = "Active turn context for delegated subagent";
         const SUBAGENT_HANDOFF_ASSISTANT: &str =
             "Delegating task to isolated Spell IDE subagent.";
-        const SUBAGENT_HANDOFF_USER_STEM: &str = "Active turn context for delegated subagent (all files/diffs are already inlined below — NEVER emit `<tool_call>` or `<function=...>` tags):\n- For `<workspace_files>` + `<query>` (`prefill_context`): respond in concise prose/bullets ONLY (never `{edits: ...}` JSON). Always cite every relevant `<file path=\"...\">` with 1-indexed `Lstart-Lend` spans, and quote the exact code identifiers in backticks.\n- For `<target_files>` + `<instruction>` (`delegate_coding`): emit surgical JSON `{\"edits\": [{\"path\": \"...\", \"old_text\": \"...\", \"new_text\": \"...\"}], \"notes\": \"...\"}` only (never markdown prose).\n- For `<unified_diff>` + `<rubric>` (`slot2_critic`): audit the inlined partial-file unified diff hunk directly without reading external files, and emit Gatekeeper JSON `{\"passed\": true|false, \"reason\": \"...\"}` only.\nYou are NOW executing ONLY as the isolated subagent (NOT the main orchestrator). Proceed with the delegated subagent task below.";
+        const SUBAGENT_HANDOFF_USER_STEM: &str = "Active turn context for delegated subagent (all files/diffs are already inlined below — NEVER emit `<tool_call>` or `<function=...>` tags):\n- For `<workspace_files>` + `<query>` (`prefill_context`): respond in concise prose/bullets ONLY (never `{edits: ...}` JSON). Always cite every relevant `<file path=\"...\">` with 1-indexed `Lstart-Lend` spans, and quote the exact code identifiers in backticks.\n- For `<target_files>` + `<instruction>` (`delegate_coding`): emit surgical JSON `{\"edits\": [{\"path\": \"...\", \"old_text\": \"...\", \"new_text\": \"...\"}], \"notes\": \"...\"}` only (never markdown prose).\n- For `<unified_diff>` + `<rubric>` (`gatekeeper_critic`): audit the inlined partial-file unified diff hunk directly without reading external files, and emit Gatekeeper JSON `{\"passed\": true|false, \"reason\": \"...\"}` only.\nYou are NOW executing ONLY as the isolated subagent (NOT the main orchestrator). Proceed with the delegated subagent task below.";
 
         let sub_model = self.effective_subagent_model_id();
         let base_tid = crate::contract::derive_slot_base_thread_key(thread_id);
-        if let Some(ref snap) = self.last_slot0_prefix {
+        if let Some(ref snap) = self.last_prefix_snapshot {
             if crate::contract::derive_slot_base_thread_key(&snap.thread_id) == base_tid
                 && !snap.messages.is_empty()
             {
@@ -2006,7 +1954,7 @@ impl SpellCoreSession {
         };
 
         let base_tid = crate::contract::derive_slot_base_thread_key(thread_id);
-        if let Some(ref snap) = self.last_slot0_prefix {
+        if let Some(ref snap) = self.last_prefix_snapshot {
             if crate::contract::derive_slot_base_thread_key(&snap.thread_id) == base_tid
                 && !snap.messages.is_empty()
             {
@@ -2243,12 +2191,12 @@ impl SpellCoreSession {
     pub fn delete_thread(&mut self, thread_id: &str) -> Result<(), String> {
         self.storage.delete_thread(thread_id)?;
         if self
-            .last_slot0_prefix
+            .last_prefix_snapshot
             .as_ref()
             .map(|s| s.thread_id == thread_id)
             .unwrap_or(false)
         {
-            self.last_slot0_prefix = None;
+            self.last_prefix_snapshot = None;
         }
         if self.selected_thread_id.as_deref() == Some(thread_id) {
             let remaining = self
@@ -2320,14 +2268,6 @@ impl SpellCoreSession {
         thread.profile = normalized.to_string();
         thread.updated_at = now_unix_secs();
         self.storage.upsert_thread(&thread)?;
-        append_agent_trace_jsonl(
-            "profile_changed",
-            json!({
-                "thread_id": thread.id,
-                "thread_title": thread.title,
-                "profile": thread.profile,
-            }),
-        );
         Ok(thread)
     }
 
@@ -2768,35 +2708,7 @@ impl SpellCoreSession {
         thread.updated_at = now_unix_secs();
         self.storage.upsert_thread(&thread)?;
 
-        append_agent_trace_jsonl(
-            "turn_start",
-            json!({
-                "thread_id": thread.id,
-                "thread_title": thread.title,
-                "project_id": thread.project_id,
-                "profile": thread.profile,
-                "stage_write_mode": self.stage_write_mode,
-                "slot2_critic_enabled": self.slot2_critic_enabled,
-                "model_id": self.model_id,
-                "subagent_model_id": self.effective_subagent_model_id(),
-                "active_tags": thread.active_tags,
-                "prompt_chars": prompt.chars().count(),
-                "prompt_preview": preview_chars(prompt, 300),
-            }),
-        );
-
-        let loop_res = self.run_agent_continuation_loop(&mut thread, DEFAULT_MAX_AGENT_STEPS);
-        if let Err(ref err) = loop_res {
-            append_agent_trace_jsonl(
-                "turn_error",
-                json!({
-                    "thread_id": thread.id,
-                    "profile": thread.profile,
-                    "error": err,
-                }),
-            );
-        }
-        loop_res?;
+        self.run_agent_continuation_loop(&mut thread, DEFAULT_MAX_AGENT_STEPS)?;
         Ok(thread)
     }
 
@@ -2962,7 +2874,7 @@ impl SpellCoreSession {
                 chat_template_kwargs: pp.and_then(|p| p.chat_template_kwargs.clone()),
             };
 
-            self.last_slot0_prefix = Some(LastSlot0PrefixSnapshot {
+            self.last_prefix_snapshot = Some(LastPrefixSnapshot {
                 thread_id: thread.id.clone(),
                 cache_key: req.prompt_cache_key.clone().unwrap_or_default(),
                 messages: req.messages.clone(),
@@ -3056,47 +2968,6 @@ impl SpellCoreSession {
 
             let turn_latency_ms = turn_start.elapsed().as_millis() as u64;
             self.record_main_turn_telemetry(&summary, turn_latency_ms);
-
-            let offered_tools: Vec<String> = req
-                .tools
-                .as_ref()
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|t| {
-                            t.get("function")
-                                .and_then(|f| f.get("name"))
-                                .and_then(Value::as_str)
-                                .map(str::to_string)
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            let requested_tcs: Vec<String> = summary
-                .tool_calls
-                .iter()
-                .map(|tc| tc.function.name.clone())
-                .collect();
-            append_agent_trace_jsonl(
-                "inference_step",
-                json!({
-                    "step": _step,
-                    "thread_id": thread.id,
-                    "profile": match profile { AgentProfile::Ask => "ask", AgentProfile::Write => "write" },
-                    "model_id": req.model,
-                    "offered_tools_count": offered_tools.len(),
-                    "offered_tools": offered_tools,
-                    "latency_ms": turn_latency_ms,
-                    "finish_reason": summary.finish_reason,
-                    "prompt_tokens": summary.usage.prompt_tokens,
-                    "completion_tokens": summary.usage.completion_tokens,
-                    "cached_tokens": summary.usage.prompt_tokens_details.as_ref().map(|d| d.cached_tokens).unwrap_or(0),
-                    "decode_tok_s": self.engine_status.lock().decode_tok_s,
-                    "reasoning_chars": summary.reasoning_content.chars().count(),
-                    "content_chars": summary.content.chars().count(),
-                    "content_preview": preview_chars(&summary.content, 300),
-                    "requested_tool_calls": requested_tcs,
-                }),
-            );
 
             // Surface any injected alarm banners as UI events without adding duplicate messages.
             for alarm_banner in &summary.engine_injected_alarms {
@@ -3992,7 +3863,7 @@ impl SpellCoreSession {
                     );
                 }
                 let enriched_output = result_preview.map(|out| {
-                    if out.contains("<!-- spell_citation:") || out.contains("<!-- beatrix_citation:") {
+                    if out.contains("<!-- spell_citation:") {
                         out
                     } else if let Ok(cit_json) = serde_json::to_string(citation) {
                         format!("<!-- spell_citation: {cit_json} -->\n{out}")
@@ -4222,7 +4093,7 @@ impl SpellCoreSession {
                 let task_payload = format!(
                     "<query>\n{query}\n</query>\n\n<workspace_files>\n{numbered_bundle}\n</workspace_files>"
                 );
-                let (slot0_cache_key, aligned_messages, aligned_tools) = self
+                let (parent_cache_key, aligned_messages, aligned_tools) = self
                     .build_shared_prefix_subagent_prompt(
                         &thread.id,
                         fallback_epoch,
@@ -4238,7 +4109,7 @@ impl SpellCoreSession {
                     max_tokens: Some(max_summary_tokens),
                     temperature: Some(0.1),
                     prompt_cache_key: Some(subagent_cache_key),
-                    parent_cache_key: Some(slot0_cache_key),
+                    parent_cache_key: Some(parent_cache_key),
                     reasoning_effort: None,
                     thinking_budget: None,
                     tools: aligned_tools,
@@ -4343,7 +4214,7 @@ impl SpellCoreSession {
                     let role_directive = "You are a coding synthesis subagent for Spell IDE. \
                         Synthesize surgical old_text / new_text edit hunks grounded in exact numbered lines of <target_files>, \
                         followed by concise verification notes for review.";
-                    let (slot0_cache_key, aligned_messages, aligned_tools) = self
+                    let (parent_cache_key, aligned_messages, aligned_tools) = self
                         .build_shared_prefix_subagent_prompt(
                             &thread.id,
                             fallback_epoch,
@@ -4359,7 +4230,7 @@ impl SpellCoreSession {
                         max_tokens: Some(2048),
                         temperature: Some(0.1),
                         prompt_cache_key: Some(subagent_cache_key),
-                        parent_cache_key: Some(slot0_cache_key),
+                        parent_cache_key: Some(parent_cache_key),
                         reasoning_effort: None,
                         thinking_budget: None,
                         tools: aligned_tools,
@@ -5144,22 +5015,6 @@ impl SpellCoreSession {
             self.record_mutation(thread_id, &tc.id, &tool_name, mutation_paths, &status, conflict_warning);
         }
 
-        append_agent_trace_jsonl(
-            "tool_call",
-            json!({
-                "thread_id": thread_id,
-                "profile": match profile { AgentProfile::Ask => "ask", AgentProfile::Write => "write" },
-                "call_id": tc.id,
-                "tool_name": tool_name,
-                "status": status,
-                "attempts": attempts,
-                "is_mcp": is_mcp,
-                "args_preview": preview_chars(&tc.function.arguments, 300),
-                "output_chars": output.chars().count(),
-                "output_preview": preview_chars(&output, 400),
-            }),
-        );
-
         (output, status, is_mcp)
     }
 
@@ -5457,7 +5312,7 @@ impl SpellCoreSession {
                                     "Staged {applied} surgical edit(s) to {}",
                                     resolved.display()
                                 );
-                                match self.stage_mutation_with_live_slot2_critic(
+                                match self.stage_mutation_with_live_critic(
                                     thread_id,
                                     &resolved,
                                     raw_path,
@@ -5553,7 +5408,7 @@ impl SpellCoreSession {
                                     "Staged surgical edit(s) to {}",
                                     resolved.display()
                                 );
-                                match self.stage_mutation_with_live_slot2_critic(
+                                match self.stage_mutation_with_live_critic(
                                     thread_id,
                                     &resolved,
                                     raw_path,
@@ -5652,7 +5507,7 @@ impl SpellCoreSession {
                                 final_content.len(),
                                 resolved.display()
                             );
-                            match self.stage_mutation_with_live_slot2_critic(
+                            match self.stage_mutation_with_live_critic(
                                 thread_id,
                                 &resolved,
                                 raw_path,
@@ -6312,7 +6167,7 @@ impl SpellCoreSession {
                 let task_payload = format!(
                     "<query>\n{query}\n</query>\n\n<workspace_files>\n{numbered_bundle}\n</workspace_files>"
                 );
-                let (slot0_cache_key, aligned_messages, aligned_tools) = self
+                let (parent_cache_key, aligned_messages, aligned_tools) = self
                     .build_shared_prefix_subagent_prompt(
                         thread_id,
                         fallback_epoch,
@@ -6328,7 +6183,7 @@ impl SpellCoreSession {
                     max_tokens: Some(max_summary_tokens),
                     temperature: Some(0.1),
                     prompt_cache_key: Some(subagent_cache_key),
-                    parent_cache_key: Some(slot0_cache_key),
+                    parent_cache_key: Some(parent_cache_key),
                     reasoning_effort: None,
                     thinking_budget: None,
                     tools: aligned_tools,
@@ -6702,7 +6557,7 @@ impl SpellCoreSession {
             let role_directive = "You are a coding synthesis subagent for Spell IDE. \
                 Synthesize surgical old_text / new_text edit hunks grounded in exact numbered lines of <target_files>, \
                 followed by concise verification notes for review.";
-            let (slot0_cache_key, aligned_messages, aligned_tools) = self
+            let (parent_cache_key, aligned_messages, aligned_tools) = self
                 .build_shared_prefix_subagent_prompt(
                     thread_id,
                     fallback_epoch,
@@ -6718,7 +6573,7 @@ impl SpellCoreSession {
                 max_tokens: Some(2048),
                 temperature: Some(0.1),
                 prompt_cache_key: Some(subagent_cache_key),
-                parent_cache_key: Some(slot0_cache_key),
+                parent_cache_key: Some(parent_cache_key),
                 reasoning_effort: None,
                 thinking_budget: None,
                 tools: aligned_tools,
@@ -7630,7 +7485,7 @@ impl SpellCoreSession {
                         return SubagentOverlayStepOutcome::Escalate {
                             reason: "web_taint_sensitive_file",
                             summary: format!(
-                                "Web-tainted thread attempted to create sensitive workspace path '{sens_target}'; escalating to slot0 for explicit user confirmation."
+                                "Web-tainted thread attempted to create sensitive workspace path '{sens_target}'; escalating to user for explicit confirmation."
                             ),
                             failed_file_meta: None,
                         };
@@ -7706,7 +7561,7 @@ impl SpellCoreSession {
                         return SubagentOverlayStepOutcome::Escalate {
                             reason: "web_taint_sensitive_file",
                             summary: format!(
-                                "Web-tainted thread attempted to modify protected workspace rule/build-hook file '{sens_target}'; escalating to slot0 for explicit user confirmation."
+                                "Web-tainted thread attempted to modify protected workspace rule/build-hook file '{sens_target}'; escalating to user for explicit confirmation."
                             ),
                             failed_file_meta: None,
                         };
@@ -7838,7 +7693,7 @@ impl SpellCoreSession {
                 self.max_critic_bounces = max_bounces_eff;
                 std::mem::swap(&mut self.snapshot_store, &mut overlay.store);
 
-                let stage_res = self.stage_mutation_with_live_slot2_critic(
+                let stage_res = self.stage_mutation_with_live_critic(
                     thread_id,
                     &resolved,
                     &rel_path,
@@ -7924,7 +7779,7 @@ impl SpellCoreSession {
                 if st.status == "verified" || st.status == "staged" {
                     let is_verified = st.status == "verified";
                     let can_cache_proposal =
-                        is_verified || (!self.slot2_critic_enabled && st.status == "staged");
+                        is_verified || (!self.critic_enabled && st.status == "staged");
                     files.push(crate::subagent_coding::DelegationFileMeta {
                         path: st.relative_path.clone(),
                         added: st.added_lines,
@@ -8564,23 +8419,6 @@ impl SpellCoreSession {
         Ok(matches.join("\n"))
     }
 
-    #[allow(dead_code)]
-    fn normalize_research_url(url: &str) -> String {
-        let trimmed = url.trim();
-        for prefix in [
-            "https://arxiv.org/abs/",
-            "http://arxiv.org/abs/",
-            "https://arxiv.org/pdf/",
-            "http://arxiv.org/pdf/",
-        ] {
-            if let Some(rest) = trimmed.strip_prefix(prefix) {
-                let clean = rest.strip_suffix(".pdf").unwrap_or(rest);
-                return format!("https://arxiv.org/html/{clean}");
-            }
-        }
-        trimmed.to_string()
-    }
-
     // ========================================================================
     // 2. Local Control-Plane Actions (Context Reset & SQLite Wall-Clock Timers)
     // ========================================================================
@@ -8634,12 +8472,12 @@ impl SpellCoreSession {
         thread.updated_at = now_unix_secs();
         self.turn_pin_cache.clear_seen_files_for_new_epoch();
         if self
-            .last_slot0_prefix
+            .last_prefix_snapshot
             .as_ref()
             .map(|s| s.thread_id == thread.id)
             .unwrap_or(false)
         {
-            self.last_slot0_prefix = None;
+            self.last_prefix_snapshot = None;
         }
         self.storage.upsert_thread(&thread)?;
 
@@ -8681,7 +8519,7 @@ impl SpellCoreSession {
     /// Atomically pops due local SQLite timers for `thread_id`.
     /// When no timers are due, returns `Ok(Vec::new())` immediately with ZERO network I/O.
     /// When timers are due, records alarm banners locally and — if an endpoint and model are
-    /// configured (or a custom test transport is active) — runs optional Slot 1 wakeup triage
+    /// configured (or a custom test transport is active) — runs optional background wakeup triage
     /// and continues the agent loop.
     pub fn poll_and_fire_due_engine_timers(
         &mut self,
@@ -8736,7 +8574,7 @@ impl SpellCoreSession {
         if can_call_endpoint {
             let sub_model = self.effective_subagent_model_id();
             if !sub_model.is_empty() {
-                let slot1_key = format!("slot1:{base_tid}:{first_timer_id}");
+                let timer_key = format!("timer:{base_tid}:{first_timer_id}");
                 let due_summary = due_timers
                     .iter()
                     .map(|t| {
@@ -8754,26 +8592,26 @@ impl SpellCoreSession {
                     .collect::<Vec<_>>()
                     .join("\n");
 
-                let slot1_role_directive = "You are a Spell IDE background wakeup triage subagent running on isolated Slot 1. \
+                let timer_role_directive = "You are a Spell IDE background wakeup triage subagent. \
                     Produce a concise, actionable 1-3 line digest of the fired timer(s) for the main orchestrator.";
-                let slot1_payload = format!("<due_timers>\n{due_summary}\n</due_timers>");
-                let (slot0_key, aligned_messages, aligned_tools) = self
+                let timer_payload = format!("<due_timers>\n{due_summary}\n</due_timers>");
+                let (parent_key, aligned_messages, aligned_tools) = self
                     .build_shared_prefix_subagent_prompt(
                         &resolved_tid,
                         thread.engine_compaction_epoch,
-                        slot1_role_directive,
-                        slot1_role_directive,
-                        &slot1_payload,
+                        timer_role_directive,
+                        timer_role_directive,
+                        &timer_payload,
                     );
 
-                let slot1_req = SubagentCompletionRequest {
+                let timer_req = SubagentCompletionRequest {
                     model: sub_model.clone(),
                     messages: aligned_messages,
                     stream: false,
                     max_tokens: Some(256),
                     temperature: Some(0.0),
-                    prompt_cache_key: Some(slot1_key.clone()),
-                    parent_cache_key: Some(slot0_key),
+                    prompt_cache_key: Some(timer_key.clone()),
+                    parent_cache_key: Some(parent_key),
                     reasoning_effort: None,
                     thinking_budget: None,
                     tools: aligned_tools,
@@ -8781,7 +8619,7 @@ impl SpellCoreSession {
                     ..Default::default()
                 };
 
-                match self.active_transport().run_subagent_completion(&slot1_req) {
+                match self.active_transport().run_subagent_completion(&timer_req) {
                     Ok(triage_resp) => {
                         self.record_live_subagent_completion(&triage_resp);
                         let cache_badge = if triage_resp.prefix_cache_reused {
@@ -8790,7 +8628,7 @@ impl SpellCoreSession {
                             " · SUBAGENT LIVE"
                         };
                         let triage_digest = format!(
-                            "<slot1_timer_triage model=\"{sub_model}\" cache_key=\"{slot1_key}\" tok_s=\"{:.1}\">\n{}\n</slot1_timer_triage>",
+                            "<timer_triage model=\"{sub_model}\" cache_key=\"{timer_key}\" tok_s=\"{:.1}\">\n{}\n</timer_triage>",
                             triage_resp.decode_tok_s,
                             triage_resp.content.trim()
                         );
@@ -8844,7 +8682,7 @@ impl SpellCoreSession {
     ///
     /// - Stages the candidate write in `self.snapshot_store` (`status = "staged"`).
     /// - Transitions `self.loop_state = LoopState::Reviewing` and derives the Gatekeeper Critic cache key
-    ///   (`slot2:<thread>:review_<seq>`) via [`resolve_slot_prompt_cache_key`].
+    ///   (`critic:<thread>:review_<seq>`) via [`resolve_slot_prompt_cache_key`].
     /// - Evaluates `static_errors` and explicit rubric constraints against the staged diff.
     /// - Enforces `self.max_critic_bounces` (default `3`):
     ///   - On `"REJECT"`, increments `self.critic_bounce_count`, rolls back the unverified staged
@@ -9549,7 +9387,7 @@ impl SpellCoreSession {
                 "Staged proposal {proposal_id} ({applied} surgical edit(s)) to {}",
                 resolved.display()
             );
-            match self.stage_mutation_with_live_slot2_critic(
+            match self.stage_mutation_with_live_critic(
                 thread_id,
                 &resolved,
                 &prop.path,
@@ -9647,9 +9485,9 @@ impl SpellCoreSession {
     }
 
     /// Stages a live file mutation (`edit_file`, `write_file`, `apply_subagent_proposal`) and runs
-    /// the Gatekeeper Critic when `self.slot2_critic_enabled` or
+    /// the Gatekeeper Critic when `self.critic_enabled` or
     /// `self.web_tainted_threads.contains(thread_id)` is true.
-    pub fn stage_mutation_with_live_slot2_critic(
+    pub fn stage_mutation_with_live_critic(
         &mut self,
         thread_id: &str,
         resolved: &Path,
@@ -9658,7 +9496,7 @@ impl SpellCoreSession {
         op_label: &str,
     ) -> Result<String, String> {
         let critic_active =
-            self.slot2_critic_enabled || self.web_tainted_threads.contains(thread_id);
+            self.critic_enabled || self.web_tainted_threads.contains(thread_id);
         if !critic_active {
             self.snapshot_store
                 .stage_write(resolved, raw_path, updated_content)
@@ -9762,11 +9600,11 @@ impl SpellCoreSession {
 
         self.loop_state = LoopState::Reviewing;
 
-        let slot2_cache_key = crate::contract::resolve_slot_prompt_cache_key(
+        let critic_cache_key = crate::contract::resolve_slot_prompt_cache_key(
             thread_id,
             0,
             false,
-            crate::contract::KvCacheSlot::Slot2CriticReviewer { seq: critic_seq },
+            crate::contract::KvCacheSlot::CriticReviewer { seq: critic_seq },
         );
 
         let mut violations: Vec<String> = Vec::new();
@@ -9850,11 +9688,11 @@ impl SpellCoreSession {
         }
 
         // 4. Optional LLM-backed Gatekeeper Critic using the configured subagent model.
-        // Strictly gated on `slot2_critic_enabled && endpoint/transport ready && non-empty model`.
+        // Strictly gated on `critic_enabled && endpoint/transport ready && non-empty model`.
         // Otherwise degrades cleanly to deterministic pre-checks with zero extra network calls.
         let mut live_reason = String::new();
         let sub_model = self.effective_subagent_model_id();
-        let llm_critic_ready = self.slot2_critic_enabled
+        let llm_critic_ready = self.critic_enabled
             && (self.uses_custom_transport || self.is_endpoint_configured())
             && !sub_model.is_empty();
         if violations.is_empty() && llm_critic_ready && !trimmed_rubric.starts_with('{') {
@@ -9879,30 +9717,30 @@ impl SpellCoreSession {
             } else {
                 String::new()
             };
-            let slot2_role_directive = "You are a Spell IDE Gatekeeper Critic subagent. \
+            let critic_role_directive = "You are a Spell IDE Gatekeeper Critic subagent. \
                 Evaluate the staged unified diff against <rubric> for security, credential leaks, \
                 syntax integrity, and rubric violations. Reply ONLY with strict JSON: \
                 {\"passed\": true|false, \"reason\": \"...\"}.";
-            let slot2_payload = format!(
+            let critic_payload = format!(
                 "<file>{}</file>\n<rubric>{}</rubric>\n{}<unified_diff>\n{}\n</unified_diff>",
                 staged.relative_path, trimmed_rubric, file_header_prefix, diff_excerpt
             );
-            let (slot0_cache_key, aligned_messages, aligned_tools) = self
-                .build_slot2_critic_subagent_prompt(
+            let (parent_cache_key, aligned_messages, aligned_tools) = self
+                .build_critic_subagent_prompt(
                     thread_id,
                     fallback_epoch,
-                    slot2_role_directive,
-                    slot2_role_directive,
-                    &slot2_payload,
+                    critic_role_directive,
+                    critic_role_directive,
+                    &critic_payload,
                 );
-            let slot2_req = SubagentCompletionRequest {
+            let critic_req = SubagentCompletionRequest {
                 model: sub_model,
                 messages: aligned_messages,
                 stream: false,
                 max_tokens: Some(768),
                 temperature: Some(0.0),
-                prompt_cache_key: Some(slot2_cache_key),
-                parent_cache_key: Some(slot0_cache_key),
+                prompt_cache_key: Some(critic_cache_key),
+                parent_cache_key: Some(parent_cache_key),
                 reasoning_effort: None,
                 thinking_budget: None,
                 tools: aligned_tools,
@@ -9910,7 +9748,7 @@ impl SpellCoreSession {
                 ..Default::default()
             };
 
-            match self.active_transport().run_subagent_completion(&slot2_req) {
+            match self.active_transport().run_subagent_completion(&critic_req) {
                 Ok(resp) => {
                     self.record_live_subagent_completion(&resp);
                     if matches!(resp.finish_reason.as_deref(), Some("length" | "max_tokens")) {
@@ -10398,20 +10236,12 @@ impl SpellCoreSession {
                 json!(total_cached_tokens),
             );
             obj.insert(
-                "slot2_critic_enabled".to_string(),
-                json!(self.slot2_critic_enabled),
-            );
-            obj.insert(
-                "slot2CriticEnabled".to_string(),
-                json!(self.slot2_critic_enabled),
-            );
-            obj.insert(
                 "critic_enabled".to_string(),
-                json!(self.slot2_critic_enabled),
+                json!(self.critic_enabled),
             );
             obj.insert(
                 "criticEnabled".to_string(),
-                json!(self.slot2_critic_enabled),
+                json!(self.critic_enabled),
             );
             obj.insert("engine_error".to_string(), json!(engine_error));
             obj.insert("engineError".to_string(), json!(engine_error));
@@ -10592,20 +10422,12 @@ impl SpellCoreSession {
             obj.insert("available_models".to_string(), json!(available_models));
             obj.insert("availableModels".to_string(), json!(available_models));
             obj.insert(
-                "slot2_critic_enabled".to_string(),
-                json!(self.slot2_critic_enabled),
-            );
-            obj.insert(
-                "slot2CriticEnabled".to_string(),
-                json!(self.slot2_critic_enabled),
-            );
-            obj.insert(
                 "critic_enabled".to_string(),
-                json!(self.slot2_critic_enabled),
+                json!(self.critic_enabled),
             );
             obj.insert(
                 "criticEnabled".to_string(),
-                json!(self.slot2_critic_enabled),
+                json!(self.critic_enabled),
             );
             obj.insert(
                 "subagent_protocol".to_string(),
@@ -11322,16 +11144,14 @@ impl SpellCoreSession {
                 self.refresh_engine_status();
                 Ok(())
             }
-            "set_slot2_critic_enabled" | "set_critic_enabled" => {
+            "set_critic_enabled" => {
                 let enabled = parsed
                     .get("enabled")
                     .or_else(|| parsed.get("critic_enabled"))
                     .or_else(|| parsed.get("criticEnabled"))
-                    .or_else(|| parsed.get("slot2_critic_enabled"))
-                    .or_else(|| parsed.get("slot2CriticEnabled"))
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
-                self.set_slot2_critic_enabled(enabled)
+                self.set_critic_enabled(enabled)
             }
             "terminate_subagent_slot" => {
                 let slot = parsed
@@ -11495,7 +11315,7 @@ impl SpellCoreSession {
                             .selected_thread_id
                             .clone()
                             .unwrap_or_default();
-                        if self.slot2_critic_enabled || self.web_tainted_threads.contains(&tid) {
+                        if self.critic_enabled || self.web_tainted_threads.contains(&tid) {
                             let rubric = parsed
                                 .get("rubric")
                                 .and_then(|v| v.as_str())
@@ -11543,7 +11363,7 @@ impl SpellCoreSession {
                             .selected_thread_id
                             .clone()
                             .unwrap_or_default();
-                        if self.slot2_critic_enabled
+                        if self.critic_enabled
                             || self.web_tainted_threads.contains(&active_tid)
                         {
                             let unverified_entries: Vec<crate::tools::StagedFileMutation> = self
@@ -11742,9 +11562,9 @@ mod tests {
     }
 
     #[test]
-    fn test_gate10_gatekeeper_critic_reject_bounce_back_cap_and_pass() {
+    fn test_critic_reject_bounce_back_cap_and_pass() {
         let tmp_dir = std::env::temp_dir().join(format!(
-            "beatrix_gate10_critic_{}_{}",
+            "spell_critic_{}_{}",
             std::process::id(),
             now_unix_secs()
         ));
@@ -11855,9 +11675,9 @@ mod tests {
     }
 
     #[test]
-    fn test_gate11_unrestricted_self_eval_loop_controls_and_git_stash_snapshot() {
+    fn test_unrestricted_self_eval_loop_controls_and_git_stash_snapshot() {
         let repo_dir = std::env::temp_dir().join(format!(
-            "beatrix_gate11_git_loop_{}_{}",
+            "spell_git_loop_{}_{}",
             std::process::id(),
             now_unix_secs()
         ));
@@ -11985,9 +11805,9 @@ mod tests {
     }
 
     #[test]
-    fn test_gate13_live_stage_write_tool_routing_and_lock_free_snapshot_cancel() {
+    fn test_live_stage_write_tool_routing_and_lock_free_snapshot_cancel() {
         let workspace_dir = std::env::temp_dir().join(format!(
-            "spell_gate13_stage_write_{}_{}",
+            "spell_stage_write_{}_{}",
             std::process::id(),
             now_unix_secs()
         ));
@@ -12003,7 +11823,7 @@ mod tests {
         );
         let _proj = session
             .add_project(
-                "Gate13Project",
+                "StageWriteProject",
                 &workspace_dir.to_string_lossy(),
                 false,
             )
@@ -12103,9 +11923,9 @@ mod tests {
     }
 
     #[test]
-    fn test_gate15_message_terminal_tool_and_spell_directive() {
+    fn test_message_terminal_tool_and_spell_directive() {
         let workspace_dir = std::env::temp_dir().join(format!(
-            "spell_gate15_msg_terminal_{}_{}",
+            "spell_msg_terminal_{}_{}",
             std::process::id(),
             now_unix_secs()
         ));
@@ -12117,7 +11937,7 @@ mod tests {
         let mut session = crate::test_support::fixture_session().unwrap();
         let _proj = session
             .add_project(
-                "Gate15Project",
+                "MsgTerminalProject",
                 &workspace_dir.to_string_lossy(),
                 false,
             )
@@ -12128,7 +11948,7 @@ mod tests {
         // matches the "spell" SteeringDirective, enables thinking (Some(true)), and injects
         // the #spell handoff instructions into tail_system_append without mutating messages[0].
         let sys_before = build_clean_system_prompt(
-            "Gate15Project",
+            "MsgTerminalProject",
             &workspace_dir,
             false,
             AgentProfile::Write,
@@ -12146,7 +11966,7 @@ mod tests {
             .tail_system_append
             .contains("Message Terminal #spell handoff invoked"));
         let sys_after = build_clean_system_prompt(
-            "Gate15Project",
+            "MsgTerminalProject",
             &workspace_dir,
             false,
             AgentProfile::Write,
@@ -12405,15 +12225,15 @@ mod tests {
     }
 
     #[test]
-    fn test_wave1d_prefill_and_delegate_subagent_tools_sandbox() {
+    fn test_prefill_and_delegate_subagent_tools_sandbox() {
         let ws = std::env::temp_dir().join(format!(
-            "beatrix_wave1d_tools_{}_{}",
+            "spell_subagent_tools_{}_{}",
             std::process::id(),
             now_unix_secs()
         ));
         let _ = fs::remove_dir_all(&ws);
         fs::create_dir_all(ws.join("src")).unwrap();
-        let raw_secret_marker = "UNIQUE_RAW_FILE_BODY_LINE_THAT_MUST_NOT_ENTER_SLOT0_998877";
+        let raw_secret_marker = "UNIQUE_RAW_FILE_BODY_LINE_THAT_MUST_NOT_ENTER_PREFIX_998877";
         fs::write(
             ws.join("src/engine.rs"),
             format!("pub fn step_decode() -> usize {{\n    // {raw_secret_marker}\n    42\n}}\n"),
@@ -12580,9 +12400,9 @@ mod tests {
     }
 
     #[test]
-    fn test_wave1d_slot1_timer_triage_and_slot2_gatekeeper_critic() {
+    fn test_background_timer_triage_and_gatekeeper_critic() {
         let ws = std::env::temp_dir().join(format!(
-            "beatrix_wave1d_slots_{}_{}",
+            "spell_timer_and_critic_{}_{}",
             std::process::id(),
             now_unix_secs()
         ));
@@ -12604,9 +12424,9 @@ mod tests {
                 Some("test-subagent-model"),
             )
             .unwrap();
-        session.slot2_critic_enabled = true;
+        session.critic_enabled = true;
         let _proj = session
-            .add_project("SlotProj", ws.to_str().unwrap(), false)
+            .add_project("CriticTimerProj", ws.to_str().unwrap(), false)
             .unwrap();
         let tid = session.selected_thread_id.clone().unwrap();
 
@@ -12650,14 +12470,14 @@ mod tests {
             "Gatekeeper Critic must NEVER invoke main stream_chat_completion"
         );
 
-        let slot2_calls = fixture.recorded_subagent_calls();
-        assert_eq!(slot2_calls.len(), 2);
-        assert_eq!(slot2_calls[0].model, "test-subagent-model");
-        assert!(slot2_calls[0]
+        let critic_calls = fixture.recorded_subagent_calls();
+        assert_eq!(critic_calls.len(), 2);
+        assert_eq!(critic_calls[0].model, "test-subagent-model");
+        assert!(critic_calls[0]
             .prompt_cache_key
             .as_deref()
             .unwrap_or("")
-            .starts_with("slot2:"));
+            .starts_with("critic:"));
 
         // Verify 503 subagent unavailable degrades cleanly to deterministic pre-check
         fixture.set_subagent_unavailable(true);
@@ -12676,7 +12496,7 @@ mod tests {
         assert_eq!(v_offline.reason, "deterministic_precheck_pass");
         fixture.set_subagent_unavailable(false);
 
-        // 2. Slot 1 Wakeup Timer Triage fires from local SQLite timer (duration_s = 0.0 -> immediately due)
+        // 2. Wakeup Timer Triage fires from local SQLite timer (duration_s = 0.0 -> immediately due)
         let _timer = session
             .schedule_engine_timer(&tid, 0.0, "build-check", "Inspect build completion", None)
             .unwrap();
@@ -12686,23 +12506,23 @@ mod tests {
         assert_eq!(fired.len(), 1);
 
         let all_sub_calls = fixture.recorded_subagent_calls();
-        let slot1_call = all_sub_calls
+        let timer_call = all_sub_calls
             .iter()
             .find(|c| {
                 c.prompt_cache_key
                     .as_deref()
                     .unwrap_or("")
-                    .starts_with("slot1:")
+                    .starts_with("timer:")
             })
-            .expect("Expected Slot 1 subagent call");
-        assert_eq!(slot1_call.model, "test-subagent-model");
+            .expect("Expected timer triage subagent call");
+        assert_eq!(timer_call.model, "test-subagent-model");
 
         let updated_thread = session.storage.get_thread(&tid).unwrap().unwrap();
         assert!(updated_thread.wire_messages.iter().any(|m| {
             m.content
                 .as_deref()
                 .unwrap_or("")
-                .contains("<slot1_timer_triage model=\"test-subagent-model\"")
+                .contains("<timer_triage model=\"test-subagent-model\"")
         }));
         assert!(updated_thread.ui_events.iter().any(|e| {
             e.kind == "engine_timer_alarm" && e.content.contains("SUBAGENT LIVE")
@@ -12712,9 +12532,9 @@ mod tests {
     }
 
     #[test]
-    fn test_wave1b_shared_prefix_and_tools_inheritance_across_prefill_and_delegate() {
+    fn test_shared_prefix_and_tools_inheritance_across_prefill_and_delegate() {
         let ws = std::env::temp_dir().join(format!(
-            "beatrix_wave1b_prefix_{}_{}",
+            "spell_shared_prefix_{}_{}",
             std::process::id(),
             now_unix_secs()
         ));
@@ -12734,14 +12554,14 @@ mod tests {
         session.epoch_cache_key_suffix = true;
 
         let _proj = session
-            .add_project("Wave1BPrefix", ws.to_str().unwrap(), false)
+            .add_project("SharedPrefixProj", ws.to_str().unwrap(), false)
             .unwrap();
         let tid = session.selected_thread_id.clone().unwrap();
 
         // Advance compaction epoch to 2 so main slot uses `<tid>:epoch2`
         session.request_engine_hot_cache_clear(&tid).unwrap();
         session.request_engine_hot_cache_clear(&tid).unwrap();
-        let expected_slot0_key = format!("{tid}:epoch2");
+        let expected_main_key = format!("{tid}:epoch2");
 
         // Step 0 on main (ends with role == "user") -> invokes prefill_context_subagent
         fixture.push_main_tool_calls_override(vec![WireToolCall {
@@ -12795,28 +12615,28 @@ mod tests {
         let last_user_idx = |msgs: &[WireMessage]| msgs.iter().rposition(|m| m.role == "user");
 
         // 1. Verify prefill_context_subagent (invoked when main ended with role == "user")
-        let slot0_step0 = &main_reqs[0];
+        let main_step0 = &main_reqs[0];
         let prefill_call = &sub_calls[0];
         assert_eq!(
-            slot0_step0.prompt_cache_key.as_deref(),
-            Some(expected_slot0_key.as_str())
+            main_step0.prompt_cache_key.as_deref(),
+            Some(expected_main_key.as_str())
         );
         assert_eq!(
             prefill_call.parent_cache_key.as_deref(),
-            Some(expected_slot0_key.as_str()),
+            Some(expected_main_key.as_str()),
             "Subagent must inherit exact main prompt_cache_key including non-zero compaction_epoch"
         );
-        assert!(slot0_step0.tools.as_ref().map(|t| !t.is_empty()).unwrap_or(false));
+        assert!(main_step0.tools.as_ref().map(|t| !t.is_empty()).unwrap_or(false));
         assert_eq!(
-            prefill_call.tools, slot0_step0.tools,
+            prefill_call.tools, main_step0.tools,
             "Subagent must inherit exact main # Tools schema for token-0 alignment"
         );
         assert_eq!(prefill_call.tool_choice, Some(json!("none")));
-        let k0 = slot0_step0.messages.len();
+        let k0 = main_step0.messages.len();
         assert_eq!(prefill_call.messages.len(), k0 + 2);
         assert_eq!(
             &prefill_call.messages[..k0],
-            &slot0_step0.messages[..k0],
+            &main_step0.messages[..k0],
             "Entire main message prefix (0..k0) must remain 100% bit-identical before subagent handoff"
         );
         assert_eq!(prefill_call.messages[k0].role, "assistant");
@@ -12827,11 +12647,11 @@ mod tests {
         assert_eq!(last_query_index_of(&prefill_call.messages), Some(k0 + 1));
 
         // 2. Verify delegate_coding_subagent (invoked when main ended with role == "tool")
-        let slot0_step1 = &main_reqs[1];
+        let main_step1 = &main_reqs[1];
         let delegate_call = &sub_calls[1];
-        assert_eq!(slot0_step1.messages.last().map(|m| m.role.as_str()), Some("tool"));
+        assert_eq!(main_step1.messages.last().map(|m| m.role.as_str()), Some("tool"));
         assert!(
-            slot0_step1
+            main_step1
                 .messages
                 .iter()
                 .any(|m| m.role == "assistant" && m.reasoning_content.is_some()),
@@ -12839,16 +12659,16 @@ mod tests {
         );
         assert_eq!(
             delegate_call.parent_cache_key.as_deref(),
-            slot0_step1.prompt_cache_key.as_deref()
+            main_step1.prompt_cache_key.as_deref()
         );
-        assert_eq!(delegate_call.tools, slot0_step1.tools);
+        assert_eq!(delegate_call.tools, main_step1.tools);
         assert!(delegate_call.stream);
         assert_eq!(delegate_call.tool_choice, Some(json!("auto")));
-        let k1 = slot0_step1.messages.len();
+        let k1 = main_step1.messages.len();
         assert_eq!(delegate_call.messages.len(), k1 + 2);
         assert_eq!(
             &delegate_call.messages[..k1],
-            &slot0_step1.messages[..k1],
+            &main_step1.messages[..k1],
             "Every message 0..k1 (including assistant reasoning_content + tool response) must be 100% identical to main"
         );
         assert_eq!(delegate_call.messages[k1].role, "assistant");
@@ -12890,9 +12710,9 @@ mod tests {
     }
 
     #[test]
-    fn test_wave1b_per_role_subagent_policy_across_all_four_roles() {
+    fn test_per_role_subagent_policy_across_all_four_roles() {
         let ws = std::env::temp_dir().join(format!(
-            "beatrix_wave1b_thinking_{}_{}",
+            "spell_role_policy_{}_{}",
             std::process::id(),
             now_unix_secs()
         ));
@@ -12906,13 +12726,13 @@ mod tests {
             SpellCoreSession::new_with_transport(Some(":memory:"), fixture.clone()).unwrap();
         session.model_id = "test-model".to_string();
         session.subagent_model_id = "test-subagent-model".to_string();
-        session.slot2_critic_enabled = true;
+        session.critic_enabled = true;
         let proj = session
-            .add_project("Wave1BThinkProj", ws.to_str().unwrap(), false)
+            .add_project("RolePolicyProj", ws.to_str().unwrap(), false)
             .unwrap();
         let tid = session.selected_thread_id.clone().unwrap();
 
-        // Prime last_slot0_prefix via a main turn so all 4 roles also inherit tools + prefix
+        // Prime last_prefix_snapshot via a main turn so all 4 roles also inherit tools + prefix
         let _ = session.send_user_prompt(&tid, "Prime main prefix").unwrap();
         let mut active_tags = Vec::new();
 
@@ -12982,7 +12802,7 @@ mod tests {
             .unwrap();
         assert!(verdict.passed);
 
-        // 4. Slot 1 Timer Triage -> local SQLite timer due immediately
+        // 4. Timer Triage -> local SQLite timer due immediately
         let _timer = session
             .schedule_engine_timer(&tid, 0.0, "w1b-timer", "Check build", None)
             .unwrap();
@@ -13023,7 +12843,7 @@ mod tests {
     }
 
     #[test]
-    fn test_wave1b_subagent_telemetry_persists_across_idle_status_refresh() {
+    fn test_subagent_telemetry_persists_across_idle_status_refresh() {
         let fixture = Arc::new(crate::test_support::FixtureTransport::new());
         let server =
             crate::test_support::LoopbackVerifyServer::start(fixture.clone(), "w1b-tel-key")
@@ -13076,9 +12896,9 @@ mod tests {
     }
 
     #[test]
-    fn test_wave1c_live_slot2_critic_pass_reject_prev_overlay_restore_header_context_and_circuit_breaker() {
+    fn test_live_gatekeeper_critic_pass_reject_prev_overlay_restore_header_context_and_circuit_breaker() {
         let ws = std::env::temp_dir().join(format!(
-            "beatrix_wave1c_critic_{}_{}",
+            "spell_live_critic_{}_{}",
             std::process::id(),
             now_unix_secs()
         ));
@@ -13094,7 +12914,7 @@ mod tests {
             "".to_string(),
         ];
         for i in 4..=34 {
-            lines.push(format!("pub const METRIC_SLOT_{i}: usize = {i};"));
+            lines.push(format!("pub const METRIC_ITEM_{i}: usize = {i};"));
         }
         lines.push("pub fn compute_quota(map: &HashMap<String, usize>, key: &str) -> usize {".to_string());
         lines.push("    map.get(key).copied().unwrap_or(10)".to_string());
@@ -13119,9 +12939,9 @@ mod tests {
                 Some("test-subagent-model"),
             )
             .unwrap();
-        session.slot2_critic_enabled = true;
+        session.critic_enabled = true;
         let proj = session
-            .add_project("Wave1CCriticProj", ws.to_str().unwrap(), false)
+            .add_project("LiveCriticProj", ws.to_str().unwrap(), false)
             .unwrap();
         let tid = session.selected_thread_id.clone().unwrap();
 
@@ -13170,28 +12990,28 @@ mod tests {
 
         // Verify recorded Gatekeeper Critic subagent call carried `<file_header lines="1-40">` + 12-line context + max_tokens=768
         let sub_calls = fixture.recorded_subagent_calls();
-        let slot2_call = sub_calls
+        let critic_call = sub_calls
             .last()
             .expect("Expected live Gatekeeper Critic subagent call on edit_file");
-        assert_eq!(slot2_call.model, "test-subagent-model");
-        assert!(slot2_call
+        assert_eq!(critic_call.model, "test-subagent-model");
+        assert!(critic_call
             .prompt_cache_key
             .as_deref()
             .unwrap_or("")
-            .starts_with("slot2:"));
-        assert_eq!(slot2_call.max_tokens, Some(768));
-        let slot2_tail_text = slot2_call
+            .starts_with("critic:"));
+        assert_eq!(critic_call.max_tokens, Some(768));
+        let critic_tail_text = critic_call
             .messages
             .last()
             .and_then(|m| m.content.as_deref())
             .unwrap_or("");
         assert!(
-            slot2_tail_text.contains("<file_header lines=\"1-40\">\nuse std::collections::HashMap;"),
-            "Gatekeeper Critic payload must prepend <file_header lines=\"1-40\"> when hunk starts after line 1: {slot2_tail_text}"
+            critic_tail_text.contains("<file_header lines=\"1-40\">\nuse std::collections::HashMap;"),
+            "Gatekeeper Critic payload must prepend <file_header lines=\"1-40\"> when hunk starts after line 1: {critic_tail_text}"
         );
         assert!(
-            slot2_tail_text.contains("pub const METRIC_SLOT_25: usize = 25;"),
-            "Gatekeeper Critic unified diff must include 12-line surrounding context (line 25 visible for edit at line 36): {slot2_tail_text}"
+            critic_tail_text.contains("pub const METRIC_ITEM_25: usize = 25;"),
+            "Gatekeeper Critic unified diff must include 12-line surrounding context (line 25 visible for edit at line 36): {critic_tail_text}"
         );
 
         let snap_pass: Value =
@@ -13342,7 +13162,7 @@ mod tests {
         assert_eq!(session.critic_bounce_count, 3, "Expected bounce #3 (> max_critic_bounces=2) to trip circuit breaker");
         assert_eq!(
             main_steps_taken, 3,
-            "Continuation loop must halt immediately after bounce #3 without executing queued 4th slot0 step"
+            "Continuation loop must halt immediately after bounce #3 without executing queued 4th main step"
         );
         assert!(
             halted_thread.ui_events.iter().any(|ev| ev
@@ -13355,9 +13175,9 @@ mod tests {
     }
 
     #[test]
-    fn test_wave1c_proposal_id_extraction_gutter_strip_and_confirm_card_materialization() {
+    fn test_proposal_id_extraction_gutter_strip_and_confirm_card_materialization() {
         let ws = std::env::temp_dir().join(format!(
-            "beatrix_wave1c_prop_{}_{}",
+            "spell_proposal_cache_{}_{}",
             std::process::id(),
             now_unix_secs()
         ));
@@ -13385,12 +13205,12 @@ mod tests {
                 Some("test-subagent-model"),
             )
             .unwrap();
-        session.slot2_critic_enabled = true;
+        session.critic_enabled = true;
         let proj = session
-            .add_project("Wave1CPropProj", ws.to_str().unwrap(), false)
+            .add_project("ProposalCacheProj", ws.to_str().unwrap(), false)
             .unwrap();
         let tid = session.selected_thread_id.clone().unwrap();
-        let _ = session.send_user_prompt(&tid, "Prime slot0 prefix").unwrap();
+        let _ = session.send_user_prompt(&tid, "Prime main prefix").unwrap();
         let mut active_tags = Vec::new();
 
         // 1. delegate_coding_subagent with `<think>{...}</think>` + numbered line gutters (`1 | ...`)
@@ -13606,9 +13426,9 @@ mod tests {
     }
 
     #[test]
-    fn test_wave1c_truncation_surfacing_and_2048_default_summary_budget() {
+    fn test_truncation_surfacing_and_2048_default_summary_budget() {
         let ws = std::env::temp_dir().join(format!(
-            "beatrix_wave1c_trunc_{}_{}",
+            "spell_subagent_trunc_{}_{}",
             std::process::id(),
             now_unix_secs()
         ));
@@ -13630,10 +13450,10 @@ mod tests {
             )
             .unwrap();
         let proj = session
-            .add_project("Wave1CTruncProj", ws.to_str().unwrap(), false)
+            .add_project("TruncBudgetProj", ws.to_str().unwrap(), false)
             .unwrap();
         let tid = session.selected_thread_id.clone().unwrap();
-        let _ = session.send_user_prompt(&tid, "Prime slot0 prefix").unwrap();
+        let _ = session.send_user_prompt(&tid, "Prime main prefix").unwrap();
         let mut active_tags = Vec::new();
 
         // 1. `prefill_context_subagent` defaults to `max_tokens = Some(2560)` (`thinking_budget = Some(1024)`) and surfaces `finish_reason = "length"`
@@ -13720,9 +13540,9 @@ mod tests {
     }
 
     #[test]
-    fn test_wave1c_parallel_subagent_batch_thread_scope_concurrency_and_deterministic_order() {
+    fn test_parallel_subagent_batch_thread_scope_concurrency_and_deterministic_order() {
         let ws = std::env::temp_dir().join(format!(
-            "beatrix_wave1c_par_{}_{}",
+            "spell_parallel_sub_{}_{}",
             std::process::id(),
             now_unix_secs()
         ));
@@ -13738,11 +13558,11 @@ mod tests {
         session.model_id = "test-model".to_string();
         session.subagent_model_id = "test-subagent-model".to_string();
         let _proj = session
-            .add_project("Wave1CParProj", ws.to_str().unwrap(), false)
+            .add_project("ParallelSubProj", ws.to_str().unwrap(), false)
             .unwrap();
         let tid = session.selected_thread_id.clone().unwrap();
         let base_tid = derive_thread_key(Some(&tid));
-        let expected_slot0_key = resolve_prompt_cache_key(&tid, 0, false);
+        let expected_main_key = resolve_prompt_cache_key(&tid, 0, false);
 
         // Queue keyed responses so concurrent worker threads match deterministically regardless of socket accept order
         fixture.push_subagent_response_for_key(
@@ -13761,7 +13581,7 @@ mod tests {
             None,
         );
 
-        // Single slot0 step emitting 3 contiguous allowed subagent calls
+        // Single main step emitting 3 contiguous allowed subagent calls
         fixture.push_main_tool_calls_override(vec![
             WireToolCall {
                 id: "call_par_0".to_string(),
@@ -13828,7 +13648,7 @@ mod tests {
         for call in &sub_calls {
             assert_eq!(
                 call.parent_cache_key.as_deref(),
-                Some(expected_slot0_key.as_str()),
+                Some(expected_main_key.as_str()),
                 "All parallel subagent calls must share the exact main parent cache key"
             );
             if call
@@ -13877,9 +13697,9 @@ mod tests {
     }
 
     #[test]
-    fn test_r4b_slot2_critic_fail_closed_verdicts_and_768_budget() {
+    fn test_critic_fail_closed_verdicts_and_768_budget() {
         let ws = std::env::temp_dir().join(format!(
-            "beatrix_r4b_critic_fc_{}_{}",
+            "spell_critic_fc_{}_{}",
             std::process::id(),
             now_unix_secs()
         ));
@@ -13902,9 +13722,9 @@ mod tests {
                 Some("test-subagent-model"),
             )
             .unwrap();
-        session.slot2_critic_enabled = true;
+        session.critic_enabled = true;
         let _proj = session
-            .add_project("R4BFailClosedProj", ws.to_str().unwrap(), false)
+            .add_project("FailClosedProj", ws.to_str().unwrap(), false)
             .unwrap();
         let tid = session.selected_thread_id.clone().unwrap();
 
@@ -14025,9 +13845,9 @@ mod tests {
         assert_eq!(v_pass.reason, "Gatekeeper Critic: Clean surgical guard");
         assert_eq!(session.critic_bounce_count, 0);
 
-        // Verify deterministic precheck reason NEVER impersonates `"Gatekeeper Critic: ..."` when `slot2_critic_enabled == false`
+        // Verify deterministic precheck reason NEVER impersonates `"Gatekeeper Critic: ..."` when `critic_enabled == false`
         let _ = session.snapshot_store.rollback_staged(Some(&calc_file));
-        session.slot2_critic_enabled = false;
+        session.critic_enabled = false;
         let v_det = session
             .evaluate_diff_with_gatekeeper_critic(
                 &tid,
@@ -14048,7 +13868,7 @@ mod tests {
     }
 
     #[test]
-    fn test_r4b_prefill_context_packet_sanitizes_nested_packets_and_leaked_tool_xml() {
+    fn test_prefill_context_packet_sanitizes_nested_packets_and_leaked_tool_xml() {
         // 1. Direct unit test on `format_prefill_context_packet` covering nested `<subagent_context_packet>`,
         //    closed `<think>...</think>`, `<function=find_path>...</function>`, and `<tool_call>...</tool_call>`.
         let raw_nested = concat!(
@@ -14117,9 +13937,9 @@ mod tests {
     }
 
     #[test]
-    fn test_r4_prefill_context_subagent_retries_empty_or_tool_call_body_deterministically() {
+    fn test_prefill_context_subagent_retries_empty_or_tool_call_body_deterministically() {
         let ws = std::env::temp_dir().join(format!(
-            "beatrix_r4_prefill_retry_{}_{}",
+            "spell_prefill_retry_{}_{}",
             std::process::id(),
             now_unix_secs()
         ));
@@ -14248,7 +14068,7 @@ mod tests {
     }
 
     #[test]
-    fn test_of_imp5_frozen_messages0_and_fetch_schema_across_online_modes() {
+    fn test_frozen_messages0_and_fetch_schema_across_online_modes() {
         let mut session = SpellCoreSession::new_in_memory().unwrap();
         let sys_offline = build_clean_system_prompt(
             "test-proj",
@@ -14318,9 +14138,9 @@ mod tests {
     }
 
     #[test]
-    fn test_of_imp5_offline_default_configure_status_and_air_gap_json_ffi() {
+    fn test_offline_default_configure_status_and_air_gap_json_ffi() {
         let ws = std::env::temp_dir().join(format!(
-            "beatrix_of_imp5_ffi_{}_{}",
+            "spell_online_ffi_{}_{}",
             std::process::id(),
             now_unix_secs()
         ));
@@ -14441,14 +14261,14 @@ mod tests {
     }
 
     #[test]
-    fn test_of_imp5_research_cache_read_allowed_write_blocked_and_workspace_read_tracking() {
+    fn test_research_cache_read_allowed_write_blocked_and_workspace_read_tracking() {
         let ws = std::env::temp_dir().join(format!(
-            "beatrix_of_imp5_cache_guard_{}_{}",
+            "spell_cache_guard_{}_{}",
             std::process::id(),
             now_unix_secs()
         ));
         let _ = fs::remove_dir_all(&ws);
-        let cache_dir = ws.join(".beatrix/research_cache/paper_2501");
+        let cache_dir = ws.join(".spell/research_cache/paper_2501");
         fs::create_dir_all(&cache_dir).unwrap();
         fs::create_dir_all(ws.join("src")).unwrap();
         fs::write(
@@ -14465,28 +14285,28 @@ mod tests {
         let tid = session.selected_thread_id.clone().unwrap();
         let mut active_tags = Vec::new();
 
-        // Reading, grepping, listing, and finding inside `.beatrix/research_cache` succeed
+        // Reading, grepping, listing, and finding inside `.spell/research_cache` succeed
         // AND do NOT taint `workspace_read_threads`!
         for (id, name, args) in [
             (
                 "c_read",
                 "read_file",
-                json!({ "path": ".beatrix/research_cache/paper_2501/paper.md" }),
+                json!({ "path": ".spell/research_cache/paper_2501/paper.md" }),
             ),
             (
                 "c_grep",
                 "grep",
-                json!({ "path": ".beatrix/research_cache/paper_2501", "pattern": "DeltaNet" }),
+                json!({ "path": ".spell/research_cache/paper_2501", "pattern": "DeltaNet" }),
             ),
             (
                 "c_find",
                 "find_path",
-                json!({ "path": ".beatrix/research_cache", "pattern": "paper.md" }),
+                json!({ "path": ".spell/research_cache", "pattern": "paper.md" }),
             ),
             (
                 "c_list",
                 "list_directory",
-                json!({ "path": ".beatrix/research_cache/paper_2501" }),
+                json!({ "path": ".spell/research_cache/paper_2501" }),
             ),
         ] {
             let tc = WireToolCall {
@@ -14509,21 +14329,21 @@ mod tests {
         }
         assert!(
             !session.workspace_read_threads.contains(&tid),
-            "Reading .beatrix/research_cache must NOT mark thread as workspace_read!"
+            "Reading .spell/research_cache must NOT mark thread as workspace_read!"
         );
 
-        // Mutating `.beatrix/research_cache` via write_file, edit_file, delete_path, move_path, copy_path (dst) is hard-blocked!
+        // Mutating `.spell/research_cache` via write_file, edit_file, delete_path, move_path, copy_path (dst) is hard-blocked!
         for (id, name, args) in [
             (
                 "m_write",
                 "write_file",
-                json!({ "path": ".beatrix/research_cache/paper_2501/injected.md", "content": "x" }),
+                json!({ "path": ".spell/research_cache/paper_2501/injected.md", "content": "x" }),
             ),
             (
                 "m_edit",
                 "edit_file",
                 json!({
-                    "path": ".beatrix/research_cache/paper_2501/paper.md",
+                    "path": ".spell/research_cache/paper_2501/paper.md",
                     "old_text": "Theorem 1",
                     "new_text": "Tampered"
                 }),
@@ -14531,13 +14351,13 @@ mod tests {
             (
                 "m_del",
                 "delete_path",
-                json!({ "path": ".beatrix/research_cache/paper_2501/paper.md" }),
+                json!({ "path": ".spell/research_cache/paper_2501/paper.md" }),
             ),
             (
                 "m_move",
                 "move_path",
                 json!({
-                    "source_path": ".beatrix/research_cache/paper_2501/paper.md",
+                    "source_path": ".spell/research_cache/paper_2501/paper.md",
                     "destination_path": "src/stolen.md"
                 }),
             ),
@@ -14546,7 +14366,7 @@ mod tests {
                 "copy_path",
                 json!({
                     "source_path": "src/lib.rs",
-                    "destination_path": ".beatrix/research_cache/paper_2501/lib.rs"
+                    "destination_path": ".spell/research_cache/paper_2501/lib.rs"
                 }),
             ),
         ] {
@@ -14597,9 +14417,9 @@ mod tests {
     }
 
     #[test]
-    fn test_of_imp5_open_web_domain_approval_and_session_taint_guard_trifecta() {
+    fn test_open_web_domain_approval_and_session_taint_guard_trifecta() {
         let ws = std::env::temp_dir().join(format!(
-            "beatrix_of_imp5_taint_trifecta_{}_{}",
+            "spell_taint_trifecta_{}_{}",
             std::process::id(),
             now_unix_secs()
         ));
@@ -14749,9 +14569,9 @@ mod tests {
     }
 
     #[test]
-    fn test_of_imp5_catch2_slot2_critic_prefix_scrubbing_and_catch3_sensitive_rule_protection() {
+    fn test_critic_prefix_scrubbing_and_sensitive_rule_protection() {
         let ws = std::env::temp_dir().join(format!(
-            "beatrix_of_imp5_catch2_catch3_{}_{}",
+            "spell_prefix_scrub_{}_{}",
             std::process::id(),
             now_unix_secs()
         ));
@@ -14777,16 +14597,16 @@ mod tests {
                 Some("test-subagent-model"),
             )
             .unwrap();
-        // Deliberately disable `stage_write_mode` so we verify `web_tainted` FORCES staged diff + Gatekeeper Critic critic!
+        // Deliberately disable `stage_write_mode` so we verify `web_tainted` FORCES staged diff + Gatekeeper Critic!
         session.stage_write_mode = false;
-        session.slot2_critic_enabled = true;
+        session.critic_enabled = true;
 
         let proj = session
-            .add_project("Catch23Proj", ws.to_str().unwrap(), false)
+            .add_project("PrefixScrubProj", ws.to_str().unwrap(), false)
             .unwrap();
         let tid = session.selected_thread_id.clone().unwrap();
 
-        // Prime clean workspace turn on Slot 0 so `last_slot0_prefix` has `messages[0]` + clean user/assistant turns.
+        // Prime clean workspace turn so `last_prefix_snapshot` has `messages[0]` + clean user/assistant turns.
         let _ = session
             .send_user_prompt(&tid, "Please inspect compute_total in src/lib.rs.")
             .unwrap();
@@ -14817,8 +14637,8 @@ mod tests {
         ));
         session.storage.upsert_thread(&thread).unwrap();
         session.web_tainted_threads.insert(tid.clone());
-        // Also pollute `last_slot0_prefix` with the untrusted messages so we verify scrubbing works on BOTH paths!
-        if let Some(ref mut snap) = session.last_slot0_prefix {
+        // Also pollute `last_prefix_snapshot` with the untrusted messages so we verify scrubbing works on BOTH paths!
+        if let Some(ref mut snap) = session.last_prefix_snapshot {
             snap.messages.push(WireMessage::assistant(
                 None,
                 None,
@@ -14937,18 +14757,18 @@ mod tests {
         assert!(session.snapshot_store.has_staged_mutation(&resolved_lib));
 
         let critic_calls = fixture.recorded_subagent_calls();
-        assert!(!critic_calls.is_empty(), "Gatekeeper Critic critic must have been invoked!");
-        let slot2_req = critic_calls.last().unwrap();
+        assert!(!critic_calls.is_empty(), "Gatekeeper Critic must have been invoked!");
+        let critic_req = critic_calls.last().unwrap();
         // Verify `messages[0]` system prompt + clean user prompt survived for shared prefix reuse...
-        assert_eq!(slot2_req.messages[0].role, "system");
-        assert!(slot2_req.messages.iter().any(|m| {
+        assert_eq!(critic_req.messages[0].role, "system");
+        assert!(critic_req.messages.iter().any(|m| {
             m.content
                 .as_deref()
                 .unwrap_or("")
                 .contains("Please inspect compute_total in src/lib.rs.")
         }));
         // ...while ZERO `<untrusted_external_content` or prompt-injection text ever reached Gatekeeper Critic!
-        for msg in &slot2_req.messages {
+        for msg in &critic_req.messages {
             let text = msg.content.as_deref().unwrap_or("");
             assert!(
                 !text.contains("<untrusted_external_content"),
@@ -15133,8 +14953,8 @@ mod tests {
     }
 
     #[test]
-    fn test_wave3a_autonomous_option_a_multistep_critic_bounce_autocommit_and_undo() {
-        let ws = tool_ux_workspace("w3a_option_a");
+    fn test_autonomous_option_a_multistep_critic_bounce_autocommit_and_undo() {
+        let ws = tool_ux_workspace("option_a");
         fs::create_dir_all(ws.join("src")).unwrap();
         fs::write(
             ws.join("src/lib.rs"),
@@ -15143,12 +14963,12 @@ mod tests {
         .unwrap();
 
         let (mut session, fixture) = crate::test_support::fixture_session_with_handle().unwrap();
-        session.slot2_critic_enabled = true;
+        session.critic_enabled = true;
         let proj = session
-            .add_project("W3AOptionA", &ws.to_string_lossy(), false)
+            .add_project("OptionAProj", &ws.to_string_lossy(), false)
             .unwrap();
         let thread = session
-            .create_thread(Some(&proj.id), Some("W3A Thread"), Some("write"), vec![])
+            .create_thread(Some(&proj.id), Some("OptionA Thread"), Some("write"), vec![])
             .unwrap();
 
         // Stage an unrelated parent file in `session.snapshot_store` to verify delegation commit leaves it untouched!
@@ -15167,12 +14987,12 @@ mod tests {
 
         // Step 1: create_directory + write_file (Gatekeeper Critic PASS) + edit_file (Gatekeeper Critic REJECT -> bounce 1/3)
         fixture.push_subagent_response_for_key(
-            "slot2:",
+            "critic:",
             r#"{"passed":true,"verdict":"PASS","reason":"meta.txt clean"}"#,
             Some("stop".to_string()),
         );
         fixture.push_subagent_response_for_key(
-            "slot2:",
+            "critic:",
             r#"{"passed":false,"verdict":"REJECT","reason":"Contains unimplemented todo!() macro"}"#,
             Some("stop".to_string()),
         );
@@ -15192,7 +15012,7 @@ mod tests {
 
         // Step 2: grep overlay (`generated/sub/meta.txt` must be visible before disk commit!) + self-corrected edit_file (Gatekeeper Critic PASS) + finish
         fixture.push_subagent_response_for_key(
-            "slot2:",
+            "critic:",
             r#"{"passed":true,"verdict":"PASS","reason":"Arithmetic fix verified"}"#,
             Some("stop".to_string()),
         );
@@ -15307,8 +15127,8 @@ mod tests {
     }
 
     #[test]
-    fn test_wave3a_sticky_fallback_triggers_and_protocol_persistence() {
-        let ws = tool_ux_workspace("w3a_fallback");
+    fn test_sticky_fallback_triggers_and_protocol_persistence() {
+        let ws = tool_ux_workspace("proto_fallback");
         fs::create_dir_all(ws.join("src")).unwrap();
         fs::write(ws.join("src/a.rs"), "pub const A: i32 = 1;\n").unwrap();
         fs::write(ws.join("src/b.rs"), "pub const B: i32 = 2;\n").unwrap();
@@ -15440,8 +15260,8 @@ mod tests {
     }
 
     #[test]
-    fn test_wave3a_four_escalation_guards_zero_disk_writes_and_proposal_synthesis() {
-        let ws = tool_ux_workspace("w3a_escalations");
+    fn test_four_escalation_guards_zero_disk_writes_and_proposal_synthesis() {
+        let ws = tool_ux_workspace("escalations");
         fs::create_dir_all(ws.join("src")).unwrap();
         fs::write(ws.join("src/good.rs"), "pub fn good() -> i32 { 1 }\n").unwrap();
         fs::write(ws.join("src/bad.rs"), "pub fn bad() -> i32 { 2 }\n").unwrap();
@@ -15449,10 +15269,10 @@ mod tests {
         fs::write(ws.join("AGENTS.md"), "# Workspace Rules\n").unwrap();
 
         let (mut session, fixture) = crate::test_support::fixture_session_with_handle().unwrap();
-        session.slot2_critic_enabled = true;
+        session.critic_enabled = true;
         session.max_critic_bounces = 2;
         let proj = session
-            .add_project("W3AEscalations", &ws.to_string_lossy(), false)
+            .add_project("EscalationsProj", &ws.to_string_lossy(), false)
             .unwrap();
         let thread = session
             .create_thread(Some(&proj.id), Some("Main Thread"), Some("write"), vec![])
@@ -15460,17 +15280,17 @@ mod tests {
 
         // Guard #1: `critic_bounces_exhausted` (after `good.rs` verified in overlay -> synthesized as cached proposal, zero disk writes!)
         fixture.push_subagent_response_for_key(
-            "slot2:",
+            "critic:",
             r#"{"passed":true,"verdict":"PASS","reason":"good.rs clean"}"#,
             Some("stop".to_string()),
         );
         fixture.push_subagent_response_for_key(
-            "slot2:",
+            "critic:",
             r#"{"passed":false,"verdict":"REJECT","reason":"unsafe block forbidden (1)"}"#,
             Some("stop".to_string()),
         );
         fixture.push_subagent_response_for_key(
-            "slot2:",
+            "critic:",
             r#"{"passed":false,"verdict":"REJECT","reason":"unsafe block still forbidden (2)"}"#,
             Some("stop".to_string()),
         );
@@ -15583,20 +15403,20 @@ mod tests {
     }
 
     #[test]
-    fn test_wave5b_high01_and_low01_jinja_fromjson_sanitization_and_cold_schema_guards() {
-        let ws = tool_ux_workspace("w5b_high01");
+    fn test_jinja_fromjson_sanitization_and_cold_subagent_schema_guards() {
+        let ws = tool_ux_workspace("jinja_schema");
         fs::create_dir_all(ws.join("src")).unwrap();
         fs::write(ws.join("src/lib.rs"), "pub fn val() -> i32 { 1 }\n").unwrap();
 
         let (mut session, fixture) = crate::test_support::fixture_session_with_handle().unwrap();
         let proj = session
-            .add_project("W5BHigh01", &ws.to_string_lossy(), false)
+            .add_project("JinjaSchemaProj", &ws.to_string_lossy(), false)
             .unwrap();
         let thread = session
-            .create_thread(Some(&proj.id), Some("W5B High01"), Some("write"), vec![])
+            .create_thread(Some(&proj.id), Some("Jinja Schema"), Some("write"), vec![])
             .unwrap();
 
-        // 1. `[LOW-01]` Cold `build_shared_prefix_autonomous_subagent_prompt` uses the exact 9-tool
+        // 1. Cold `build_shared_prefix_autonomous_subagent_prompt` uses the exact 9-tool
         //    subagent schema (`build_subagent_openai_tools_schema`), NOT the 17-tool parent schema!
         let (_, _, cold_tools_opt) = session.build_shared_prefix_autonomous_subagent_prompt(
             &thread.id,
@@ -15617,7 +15437,7 @@ mod tests {
         // mid-sentence must NOT mutate `msgs[k - 1]` in place!
         let sneaky_user_msg =
             "Can you explain why Active turn context for delegated subagent appears in logs?";
-        session.last_slot0_prefix = Some(LastSlot0PrefixSnapshot {
+        session.last_prefix_snapshot = Some(LastPrefixSnapshot {
             thread_id: thread.id.clone(),
             cache_key: thread.id.clone(),
             messages: vec![
@@ -15646,12 +15466,12 @@ mod tests {
             Some(ALL_HEADLESS_TOOL_NAMES.len()),
             "Warm shared-prefix branch must preserve parent 17-tool schema untouched!"
         );
-        session.last_slot0_prefix = None;
+        session.last_prefix_snapshot = None;
 
-        // 2. `[HIGH-01]` DisallowedTool (`list_directory`) with `arguments == ""` AND `terminal` with `"[]"`
+        // 2. DisallowedTool (`list_directory`) with `arguments == ""` AND `terminal` with `"[]"`
         //    must be sanitized to `"{}"` in `loop_messages` echoed into Step 1!
         fixture.push_subagent_response_for_key(
-            "slot2:",
+            "critic:",
             r#"{"passed":true,"reason":"clean edit"}"#,
             Some("stop".to_string()),
         );
@@ -15717,7 +15537,7 @@ mod tests {
 
         // Also verify `run_agent_continuation_loop` sanitizes non-object `summary.tool_calls` before storing in `thread.wire_messages`
         fixture.push_main_tool_calls_override(vec![WireToolCall {
-            id: "slot0_empty_args".to_string(),
+            id: "main_empty_args".to_string(),
             r#type: "function".to_string(),
             function: WireToolFunction {
                 name: "list_directory".to_string(),
@@ -15734,16 +15554,16 @@ mod tests {
             .iter()
             .filter_map(|m| m.tool_calls.as_ref())
             .flatten()
-            .find(|tc| tc.id == "slot0_empty_args")
-            .expect("slot0_empty_args in thread.wire_messages");
+            .find(|tc| tc.id == "main_empty_args")
+            .expect("main_empty_args in thread.wire_messages");
         assert_eq!(main_asst_tc.function.arguments, "{}");
 
         let _ = fs::remove_dir_all(&ws);
     }
 
     #[test]
-    fn test_wave5b_high02_and_high04_web_taint_staged_hold_and_intra_workspace_symlink_guard() {
-        let ws = tool_ux_workspace("w5b_high02_04");
+    fn test_web_taint_staged_hold_and_intra_workspace_symlink_guard() {
+        let ws = tool_ux_workspace("taint_symlink");
         fs::create_dir_all(ws.join("src")).unwrap();
         fs::create_dir_all(ws.join("docs")).unwrap();
         let orig_lib = "pub fn compute() -> i32 { 10 }\n";
@@ -15756,20 +15576,20 @@ mod tests {
 
         let (mut session, fixture) = crate::test_support::fixture_session_with_handle().unwrap();
         session.stage_write_mode = false;
-        session.slot2_critic_enabled = true;
+        session.critic_enabled = true;
         let proj = session
-            .add_project("W5BHigh0204", &ws.to_string_lossy(), false)
+            .add_project("TaintSymlinkProj", &ws.to_string_lossy(), false)
             .unwrap();
         let thread = session
-            .create_thread(Some(&proj.id), Some("W5B Tainted"), Some("write"), vec![])
+            .create_thread(Some(&proj.id), Some("Tainted Thread"), Some("write"), vec![])
             .unwrap();
         session.web_tainted_threads.insert(thread.id.clone());
 
-        // 1. `[HIGH-02]` + Cold Gatekeeper Critic partial-diff hint:
+        // 1. Cold Gatekeeper Critic partial-diff hint:
         //    On a `web_tainted_threads` thread, non-sensitive subagent edits (`src/lib.rs`) pass Gatekeeper Critic,
         //    stay staged in `session.snapshot_store` (`"web_taint_staged_review"`), and leave physical disk untouched!
         fixture.push_subagent_response_for_key(
-            "slot2:",
+            "critic:",
             r#"{"passed":true,"reason":"Clean arithmetic update"}"#,
             Some("stop".to_string()),
         );
@@ -15818,19 +15638,19 @@ mod tests {
         assert_eq!(staged_entries[0].staged_content, "pub fn compute() -> i32 { 20 }\n");
 
         // Verify Cold Gatekeeper Critic prompt received `<subagent_role>` + partial-diff context note!
-        let slot2_calls: Vec<_> = fixture
+        let critic_calls: Vec<_> = fixture
             .recorded_subagent_calls()
             .into_iter()
-            .filter(|c| c.prompt_cache_key.as_deref().unwrap_or("").starts_with("slot2:"))
+            .filter(|c| c.prompt_cache_key.as_deref().unwrap_or("").starts_with("critic:"))
             .collect();
-        assert!(!slot2_calls.is_empty());
-        let cold_slot2_user = slot2_calls[0]
+        assert!(!critic_calls.is_empty());
+        let cold_critic_user = critic_calls[0]
             .messages
             .last()
             .and_then(|m| m.content.as_deref())
             .unwrap_or("");
-        assert!(cold_slot2_user.contains("<subagent_role model=\"test-model\">"));
-        assert!(cold_slot2_user.contains(
+        assert!(cold_critic_user.contains("<subagent_role model=\"test-model\">"));
+        assert!(cold_critic_user.contains(
             "audit the inlined partial-file unified diff hunk directly; hunks show surrounding context lines rather than the entire file"
         ));
 
@@ -15879,7 +15699,7 @@ mod tests {
         let _ = session.snapshot_store.rollback_staged(None);
         let _ = session.dispatch_json_command(r#"{"cmd":"set_stage_write_mode","enabled":true}"#);
         fixture.push_subagent_response_for_key(
-            "slot2:",
+            "critic:",
             r#"{"passed":true,"reason":"Stage hold ok"}"#,
             Some("stop".to_string()),
         );
@@ -15908,14 +15728,14 @@ mod tests {
     }
 
     #[test]
-    fn test_wave5b_medium02_sqlite_reopen_preserves_undo_log_undone_ids_and_monotonic_seq() {
-        let ws = tool_ux_workspace("w5b_medium02");
+    fn test_sqlite_reopen_preserves_undo_log_undone_ids_and_monotonic_seq() {
+        let ws = tool_ux_workspace("undo_persist");
         fs::create_dir_all(ws.join("src")).unwrap();
         let orig_a = "pub const A: usize = 1;\n";
         let orig_b = "pub const B: usize = 2;\n";
         fs::write(ws.join("src/a.rs"), orig_a).unwrap();
         fs::write(ws.join("src/b.rs"), orig_b).unwrap();
-        let db_path = ws.join("w5b_undo_persist.sqlite3");
+        let db_path = ws.join("undo_persist.sqlite3");
         let db_str = db_path.to_string_lossy().into_owned();
 
         let tid_saved: String;
@@ -15926,7 +15746,7 @@ mod tests {
             let mut s1 =
                 SpellCoreSession::new_with_transport(Some(&db_str), fixture.clone()).unwrap();
             let proj = s1
-                .add_project("W5BMed02", &ws.to_string_lossy(), false)
+                .add_project("UndoPersistProj", &ws.to_string_lossy(), false)
                 .unwrap();
             let thread = s1
                 .create_thread(Some(&proj.id), Some("Persist Undo"), Some("write"), vec![])
@@ -15934,7 +15754,7 @@ mod tests {
             tid_saved = thread.id.clone();
 
             fixture.push_subagent_response_for_key(
-                "slot2:",
+                "critic:",
                 r#"{"passed":true,"reason":"ok"}"#,
                 Some("stop".to_string()),
             );
@@ -15981,7 +15801,7 @@ mod tests {
 
             // Commit a new delegation in Session 2 -> must be assigned `"del-2"` (NEVER `"del-1"`)!
             fixture2.push_subagent_response_for_key(
-                "slot2:",
+                "critic:",
                 r#"{"passed":true,"reason":"ok"}"#,
                 Some("stop".to_string()),
             );
@@ -16023,14 +15843,14 @@ mod tests {
     }
 
     #[test]
-    fn test_wave5b_medium03_parallel_batch_same_file_overlap_escalates_conflict() {
-        let ws = tool_ux_workspace("w5b_medium03");
+    fn test_parallel_batch_same_file_overlap_escalates_conflict() {
+        let ws = tool_ux_workspace("parallel_overlap");
         fs::create_dir_all(ws.join("src")).unwrap();
         fs::write(ws.join("src/shared.rs"), "pub const SHARED: usize = 1;\n").unwrap();
 
         let (mut session, fixture) = crate::test_support::fixture_session_with_handle().unwrap();
         let proj = session
-            .add_project("W5BMed03", &ws.to_string_lossy(), false)
+            .add_project("ParallelOverlapProj", &ws.to_string_lossy(), false)
             .unwrap();
         let mut thread = session
             .create_thread(Some(&proj.id), Some("Parallel Batch"), Some("write"), vec![])
@@ -16039,7 +15859,7 @@ mod tests {
         // Queue keyed responses (`subagent0:delegate:` vs `subagent1:delegate:`) so `std::thread::scope`
         // OS thread scheduling is 100% deterministic across parallel batch workers!
         fixture.push_subagent_response_for_key(
-            "slot2:",
+            "critic:",
             r#"{"passed":true,"reason":"ok"}"#,
             Some("stop".to_string()),
         );
@@ -16110,7 +15930,7 @@ mod tests {
         // Part 2: Dynamic in-loop overlap when `target_files` is omitted (`[]`) — item 1's `edit_file`
         // inside `execute_subagent_overlay_tool` hits `detect_batch_sibling_conflict` and escalates!
         fixture.push_subagent_response_for_key(
-            "slot2:",
+            "critic:",
             r#"{"passed":true,"reason":"ok"}"#,
             Some("stop".to_string()),
         );
@@ -16177,7 +15997,7 @@ mod tests {
         assert_eq!(session.model_id, "");
         assert_eq!(session.subagent_model_id, "");
         assert_eq!(session.effective_subagent_model_id(), "");
-        assert!(!session.slot2_critic_enabled);
+        assert!(!session.critic_enabled);
 
         // refresh_engine_status performs ZERO network I/O and reports clean offline (no error)
         session.refresh_engine_status();
@@ -16187,7 +16007,8 @@ mod tests {
         assert_eq!(snap["endpointConfigured"], json!(false));
         assert_eq!(snap["endpoint_base_url"], json!(""));
         assert_eq!(snap["model_id"], json!(""));
-        assert_eq!(snap["slot2_critic_enabled"], json!(false));
+        assert_eq!(snap["critic_enabled"], json!(false));
+        assert_eq!(snap["criticEnabled"], json!(false));
         assert_eq!(snap["telemetry"]["engine_online"], json!(false));
         assert!(snap["telemetry"]["engine_error"].is_null());
 
@@ -16310,7 +16131,7 @@ mod tests {
     }
 
     #[test]
-    fn test_configure_endpoint_fetch_models_slot2_toggle_local_slots_and_no_api_key_in_sqlite() {
+    fn test_configure_endpoint_fetch_models_critic_toggle_local_slots_and_no_api_key_in_sqlite() {
         let db_file = std::env::temp_dir().join(format!(
             "spell_ep_persist_{}_{}.sqlite3",
             std::process::id(),
@@ -16375,14 +16196,16 @@ mod tests {
             .unwrap();
             assert_eq!(models_again["ok"], json!(true));
 
-            // 4. Toggle slot2_critic_enabled on and verify snapshot
+            // 4. Toggle critic_enabled on and verify snapshot
             let critic_on: Value = serde_json::from_str(&session.dispatch_json_command(
-                &json!({ "cmd": "set_slot2_critic_enabled", "enabled": true }).to_string(),
+                &json!({ "cmd": "set_critic_enabled", "enabled": true }).to_string(),
             ))
             .unwrap();
             assert_eq!(critic_on["ok"], json!(true));
-            assert_eq!(critic_on["slot2_critic_enabled"], json!(true));
-            assert_eq!(critic_on["telemetry"]["slot2_critic_enabled"], json!(true));
+            assert_eq!(critic_on["critic_enabled"], json!(true));
+            assert_eq!(critic_on["criticEnabled"], json!(true));
+            assert_eq!(critic_on["telemetry"]["critic_enabled"], json!(true));
+            assert_eq!(critic_on["telemetry"]["criticEnabled"], json!(true));
 
             // 5. Exercise local subagent slots 1..=4 (run, duplicate, read lines, terminate)
             fixture.push_subagent_response_override("Slot 1 computed answer: 42");
@@ -16462,7 +16285,7 @@ mod tests {
         assert_eq!(reopened.http_transport.base_url(), server.base_url());
         assert_eq!(reopened.model_id, "test-model");
         assert_eq!(reopened.subagent_model_id, "test-subagent-model");
-        assert!(reopened.slot2_critic_enabled);
+        assert!(reopened.critic_enabled);
         assert!(reopened.http_transport.api_key_override().is_none());
 
         let _ = fs::remove_file(&db_file);
@@ -16617,7 +16440,7 @@ mod tests {
     fn test_dispatch_extract_pdf_text_missing_file_returns_error() {
         let mut session = SpellCoreSession::new_in_memory().unwrap();
         let missing = std::env::temp_dir().join(format!(
-            "beatrix_dispatch_missing_{}_{}.pdf",
+            "spell_dispatch_missing_{}_{}.pdf",
             std::process::id(),
             now_unix_secs()
         ));

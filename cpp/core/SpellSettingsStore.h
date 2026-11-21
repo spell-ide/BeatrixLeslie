@@ -68,8 +68,8 @@ public:
                            const QString& modelId,
                            const QString& subagentModelId);
 
-    bool slot2CriticEnabled() const;
-    void setSlot2CriticEnabled(bool enabled);
+    bool criticEnabled() const;
+    void setCriticEnabled(bool enabled);
 
     int leftPaneWidth() const;
     void setLeftPaneWidth(int width);

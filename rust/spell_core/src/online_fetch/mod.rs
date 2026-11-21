@@ -395,12 +395,11 @@ pub fn execute_online_fetch(
 }
 
 /// Helper check for staging path write-protection (matched component-wise case-insensitively
-/// so both `.spell/research_cache/...` and legacy `.beatrix/research_cache/...` are caught on
-/// case-insensitive APFS even before the directory exists).
+/// so `.spell/research_cache/...` is caught on case-insensitive filesystems even before the
+/// directory exists).
 pub fn is_research_cache_path(path: &Path) -> bool {
     let matches_cache_pair = |parent: &str, child: &str| {
-        (parent.eq_ignore_ascii_case(".spell") || parent.eq_ignore_ascii_case(".beatrix"))
-            && child.eq_ignore_ascii_case("research_cache")
+        parent.eq_ignore_ascii_case(".spell") && child.eq_ignore_ascii_case("research_cache")
     };
 
     let normal_comps: Vec<std::borrow::Cow<'_, str>> = path

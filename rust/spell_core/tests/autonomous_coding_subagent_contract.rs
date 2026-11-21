@@ -3,9 +3,7 @@
 //! (`127.0.0.1:0`).
 
 #[cfg(not(feature = "test-support"))]
-pub use spell_core::{
-    agent_loop, contract, is_turn_cancel_requested, locator, transport, upstream_compat,
-};
+pub use spell_core::{agent_loop, contract, is_turn_cancel_requested, locator, transport};
 #[cfg(not(feature = "test-support"))]
 #[path = "../src/test_support.rs"]
 mod test_support;
@@ -811,8 +809,8 @@ fn test_e2e_disallowed_parent_tools_sandboxed_without_malformed_penalty() {
 // ============================================================================
 
 #[test]
-fn test_e2e_slot2_critic_reject_self_heal_and_three_bounce_escalation_preserves_parent_loop_state() {
-    let ws = TempWorkspace::new("slot2_bounces");
+fn test_e2e_critic_reject_self_heal_and_three_bounce_escalation_preserves_parent_loop_state() {
+    let ws = TempWorkspace::new("critic_bounces");
     let orig_a = concat!(
         "pub fn parse_port(raw: &str) -> Result<u16, String> {\n",
         "    Ok(8080)\n",
@@ -823,11 +821,11 @@ fn test_e2e_slot2_critic_reject_self_heal_and_three_bounce_escalation_preserves_
     ws.write_rel("src/part_b.rs", orig_b);
 
     let (mut session, fixture, _server, tid) = boot_http_loopback_session(&ws, Some(":memory:"));
-    session.slot2_critic_enabled = true;
+    session.critic_enabled = true;
 
     // --- Part A: Bounce 1 rejected (`fix_hint: "remove .unwrap()"`), Step 1 self-heals, Gatekeeper Critic PASS, Step 2 finish ---
     fixture.push_subagent_response_for_key(
-        "slot2:",
+        "critic:",
         json!({
             "passed": false,
             "reason": "Fallible parse uses .unwrap()",
@@ -838,7 +836,7 @@ fn test_e2e_slot2_critic_reject_self_heal_and_three_bounce_escalation_preserves_
         Some("stop".to_string()),
     );
     fixture.push_subagent_response_for_key(
-        "slot2:",
+        "critic:",
         json!({
             "passed": true,
             "reason": "Propagates parse error cleanly via map_err"
@@ -910,7 +908,7 @@ fn test_e2e_slot2_critic_reject_self_heal_and_three_bounce_escalation_preserves_
     session.loop_state = LoopState::Active;
     for attempt in 1..=3 {
         fixture.push_subagent_response_for_key(
-            "slot2:",
+            "critic:",
             json!({
                 "passed": false,
                 "reason": format!("Unchecked division by zero (attempt {attempt})"),

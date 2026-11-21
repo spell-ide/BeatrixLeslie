@@ -35,11 +35,6 @@ namespace spell {
 
 namespace {
 
-bool isWaylandPlatform() {
-    return QGuiApplication::platformName().contains(
-        QLatin1StringView("wayland"), Qt::CaseInsensitive);
-}
-
 void applyWindowBackground(QWidget* window, const QColor& backgroundColor) {
     if (!window) {
         return;
@@ -254,6 +249,7 @@ void installFramelessTitlebarChrome(QWidget* window) {
     }
 
     ensureExpandedClientAreaFlags(window);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 9, 0)
     // Let content (34px top bars) extend under the titlebar instead of being pushed
     // down by the safe-area margins Qt applies by default.
     window->setAttribute(Qt::WA_ContentsMarginsRespectsSafeArea, false);
@@ -265,6 +261,7 @@ void installFramelessTitlebarChrome(QWidget* window) {
             }
         }
     }
+#endif
 
     if (!window->property("_spellFramelessChromeInstalled").toBool()) {
         window->setProperty("_spellFramelessChromeInstalled", true);

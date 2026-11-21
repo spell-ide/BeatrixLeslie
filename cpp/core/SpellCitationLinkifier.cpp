@@ -29,9 +29,7 @@ bool isResearchCachePath(const QString& normalizedPath) {
         return false;
     }
     return normalizedPath.startsWith(QLatin1String(".spell/research_cache/"))
-           || normalizedPath.startsWith(QLatin1String(".beatrix/research_cache/"))
-           || normalizedPath.contains(QLatin1String("/.spell/research_cache/"))
-           || normalizedPath.contains(QLatin1String("/.beatrix/research_cache/"));
+           || normalizedPath.contains(QLatin1String("/.spell/research_cache/"));
 }
 
 bool isKnownFileExtension(const QString& extLower) {

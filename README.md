@@ -2,6 +2,8 @@
 
 A native agentic IDE. C++20, Qt 6, QScintilla2, Rust. No Electron. No telemetry. No bundled models. No vendor lock-in.
 
+![BeatrixLeslie IDE](docs/screenshot.png)
+
 BeatrixLeslie IDE speaks the OpenAI wire protocol and nothing else. Point it at any `/v1` endpoint — local or remote — and it works. Your keys live in the OS keychain. Your code never leaves your machine unless you send it.
 
 - **Three panes.** Projects and conversations. Editor. Agent.
@@ -49,6 +51,12 @@ cd BeatrixLeslie
 ./scripts/build_and_run.sh --test --verify-loader --run
 ```
 
+macOS self-contained `.app`:
+
+```bash
+./scripts/build_and_run.sh --install dist --deploy-qt --test --verify-loader
+```
+
 Windows:
 
 ```powershell
@@ -81,6 +89,12 @@ Open **Settings → Engine**. Enter a base URL. Fetch models. Pick one. Save.
 | OpenRouter | `https://openrouter.ai/api/v1` |
 
 API keys go in the OS keychain. Nothing is written to disk in plaintext. Until an endpoint is saved, the IDE makes zero network requests.
+
+---
+
+## Contributing
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ---
 

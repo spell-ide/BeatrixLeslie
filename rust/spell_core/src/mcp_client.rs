@@ -5,7 +5,7 @@
 //!    `JsonRpcResponse`, `JsonRpcError`).
 //! 2. **`McpStdioClient`**: Real line-delimited JSON-RPC 2.0 client over stdio pipes that connects
 //!    either to a spawned subprocess (`Command::new(program)...stdin(Stdio::piped()).stdout(Stdio::piped())`)
-//!    or an OS pipe pair (`libc::pipe`) attached to [`EmbeddedMcpResponder`].
+//!    or an in-process OS pipe / loopback stream pair attached to [`EmbeddedMcpResponder`].
 //!    Supports `initialize`, `list_tools`, `call_tool`, and `< 50 ms` `cancel_request`
 //!    (`notifications/cancelled` + `$/cancelRequest`).
 //! 3. **`EmbeddedMcpResponder`**: 10-tool `spell-full-file-mcp` compatible responder over real
@@ -401,7 +401,8 @@ fn id_value_to_key(id: &Value) -> Option<String> {
     }
 }
 
-/// Creates a real OS pipe pair `(read_file, write_file)` via `libc::pipe`.
+/// Creates a real OS pipe pair `(read_file, write_file)` on Unix.
+#[cfg(unix)]
 pub fn create_os_pipe() -> Result<(fs::File, fs::File), String> {
     let mut fds = [0 as libc::c_int; 2];
     let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
@@ -417,6 +418,44 @@ pub fn create_os_pipe() -> Result<(fs::File, fs::File), String> {
         let writer = fs::File::from_raw_fd(fds[1]);
         Ok((reader, writer))
     }
+}
+
+#[cfg(not(unix))]
+struct ShutdownOnDropTcpWriter(std::net::TcpStream);
+
+#[cfg(not(unix))]
+impl Write for ShutdownOnDropTcpWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.flush()
+    }
+}
+
+#[cfg(not(unix))]
+impl Drop for ShutdownOnDropTcpWriter {
+    fn drop(&mut self) {
+        let _ = self.0.shutdown(std::net::Shutdown::Write);
+    }
+}
+
+#[cfg(not(unix))]
+fn create_loopback_pipe() -> Result<(std::net::TcpStream, ShutdownOnDropTcpWriter), String> {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")
+        .map_err(|e| format!("Failed to bind loopback pipe listener: {e}"))?;
+    let addr = listener
+        .local_addr()
+        .map_err(|e| format!("Failed to inspect loopback pipe address: {e}"))?;
+    let writer = std::net::TcpStream::connect(addr)
+        .map_err(|e| format!("Failed to connect loopback pipe writer: {e}"))?;
+    let _ = writer.set_nodelay(true);
+    let (reader, _) = listener
+        .accept()
+        .map_err(|e| format!("Failed to accept loopback pipe reader: {e}"))?;
+    let _ = reader.set_nodelay(true);
+    Ok((reader, ShutdownOnDropTcpWriter(writer)))
 }
 
 // ============================================================================
@@ -689,10 +728,17 @@ impl McpStdioClient {
         }
     }
 
-    /// Connects an `McpStdioClient` to a given [`EmbeddedMcpResponder`] over a real OS pipe pair (`libc::pipe`).
+    /// Connects an `McpStdioClient` to a given [`EmbeddedMcpResponder`] over an in-process stream pair.
     pub fn connect_embedded(responder: Arc<EmbeddedMcpResponder>) -> Result<Self, String> {
+        #[cfg(unix)]
         let (c2s_read, c2s_write) = create_os_pipe()?;
+        #[cfg(unix)]
         let (s2c_read, s2c_write) = create_os_pipe()?;
+
+        #[cfg(not(unix))]
+        let (c2s_read, c2s_write) = create_loopback_pipe()?;
+        #[cfg(not(unix))]
+        let (s2c_read, s2c_write) = create_loopback_pipe()?;
 
         let _server_handle = responder.clone().serve_streams(c2s_read, s2c_write);
         let mut client = Self::from_streams(s2c_read, c2s_write);
@@ -2018,6 +2064,7 @@ fn read_dir_listing(dir: &Path) -> Result<String, String> {
     Ok(rows.join("\n"))
 }
 
+#[cfg(unix)]
 fn check_pid_alive(pid: i32) -> bool {
     if pid <= 0 {
         return false;
@@ -2028,6 +2075,17 @@ fn check_pid_alive(pid: i32) -> bool {
     }
     let err = std::io::Error::last_os_error();
     err.raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(not(unix))]
+fn check_pid_alive(pid: i32) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+    let target = sysinfo::Pid::from_u32(pid as u32);
+    let mut sys = sysinfo::System::new();
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[target]), true);
+    sys.process(target).is_some()
 }
 
 pub(crate) fn is_loopback_http_target(url: &str) -> bool {
@@ -2457,18 +2515,22 @@ mod tests {
         fs::create_dir_all(&tmp_dir).unwrap();
 
         let side_effect_path = tmp_dir.join("mcp_side_effect.log");
-        let cmd_str = format!(
-            "echo ran >> '{}'; echo 'operation failed' >&2; exit 71",
-            side_effect_path.display()
-        );
-
-        let client = McpStdioClient::spawn_sandboxed(
-            "/bin/sh",
-            &["-c", &cmd_str],
-            &[],
-            true,
-        )
-        .unwrap();
+        #[cfg(not(windows))]
+        let client = {
+            let cmd_str = format!(
+                "echo ran >> '{}'; echo 'operation failed' >&2; exit 71",
+                side_effect_path.display()
+            );
+            McpStdioClient::spawn_sandboxed("/bin/sh", &["-c", &cmd_str], &[], true).unwrap()
+        };
+        #[cfg(windows)]
+        let client = {
+            let cmd_str = format!(
+                "(echo ran>>\"{}\") & (echo operation failed 1>&2) & exit /b 71",
+                side_effect_path.display()
+            );
+            McpStdioClient::spawn_sandboxed("cmd", &["/C", &cmd_str], &[], true).unwrap()
+        };
 
         // Wait briefly for the child to exit 71
         thread::sleep(Duration::from_millis(80));

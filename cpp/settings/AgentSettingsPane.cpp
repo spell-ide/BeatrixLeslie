@@ -20,6 +20,8 @@
 #include <QWidget>
 
 #include <algorithm>
+#include <cstddef>
+#include <utility>
 #include <vector>
 
 namespace spell {
@@ -204,7 +206,7 @@ struct AgentSettingsPane::Impl {
     QComboBox* subagentProtocolCombo = nullptr;
     QLabel* protocolDescriptionLabel = nullptr;
     SpellValueRow* subagentModelRow = nullptr;
-    SpellValueRow* slot2CriticRow = nullptr;
+    SpellValueRow* criticRow = nullptr;
     SpellValueRow* activeDelegationsRow = nullptr;
 
     // 4. Online Research Posture card
@@ -760,13 +762,13 @@ AgentSettingsPane::AgentSettingsPane(SpellCoreClient* client, QWidget* parent)
         m_impl->valueRows.push_back(m_impl->subagentModelRow);
         cardLayout->addWidget(m_impl->subagentModelRow);
 
-        m_impl->slot2CriticRow = new SpellValueRow(
+        m_impl->criticRow = new SpellValueRow(
             QStringLiteral("Gatekeeper Critic review"),
             QStringLiteral("Disabled"),
             BadgeTone::Neutral,
             card);
-        m_impl->valueRows.push_back(m_impl->slot2CriticRow);
-        cardLayout->addWidget(m_impl->slot2CriticRow);
+        m_impl->valueRows.push_back(m_impl->criticRow);
+        cardLayout->addWidget(m_impl->criticRow);
 
         m_impl->activeDelegationsRow = new SpellValueRow(
             QStringLiteral("Active delegations"),
@@ -1006,11 +1008,11 @@ void AgentSettingsPane::updateSnapshot(const WorkspaceSnapshot& snap) {
         m_impl->subagentModelRow->setValueIsPrimary(hasModel);
         m_impl->subagentModelRow->setTone(hasModel ? BadgeTone::Info : BadgeTone::Neutral);
     }
-    if (m_impl->slot2CriticRow) {
-        m_impl->slot2CriticRow->setValue(
-            snap.slot2CriticEnabled ? QStringLiteral("Enabled") : QStringLiteral("Disabled"));
-        m_impl->slot2CriticRow->setTone(
-            snap.slot2CriticEnabled ? BadgeTone::Success : BadgeTone::Neutral);
+    if (m_impl->criticRow) {
+        m_impl->criticRow->setValue(
+            snap.criticEnabled ? QStringLiteral("Enabled") : QStringLiteral("Disabled"));
+        m_impl->criticRow->setTone(
+            snap.criticEnabled ? BadgeTone::Success : BadgeTone::Neutral);
     }
     if (m_impl->activeDelegationsRow) {
         const qsizetype activeCount = snap.activeSubagents.size();

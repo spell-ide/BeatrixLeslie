@@ -13,7 +13,26 @@ set(CMAKE_MACOSX_RPATH ON)
 set(CMAKE_BUILD_WITH_INSTALL_RPATH OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# Automatically help CMake locate Homebrew Qt 6 and QScintilla2 on macOS
+# Automatically help CMake locate Homebrew Qt 6 and QScintilla2 on macOS,
+# and honor environment Qt / chainload prefixes on Windows and Linux.
+if(DEFINED QT_Chainload AND EXISTS "${QT_Chainload}")
+    list(APPEND CMAKE_PREFIX_PATH "${QT_Chainload}")
+endif()
+
+foreach(_spell_env_prefix_var CMAKE_PREFIX_PATH QT_ROOT_DIR Qt6_DIR)
+    if(DEFINED ENV{${_spell_env_prefix_var}} AND NOT "$ENV{${_spell_env_prefix_var}}" STREQUAL "")
+        file(TO_CMAKE_PATH "$ENV{${_spell_env_prefix_var}}" _spell_env_paths)
+        foreach(_spell_env_p ${_spell_env_paths})
+            if(EXISTS "${_spell_env_p}")
+                list(APPEND CMAKE_PREFIX_PATH "${_spell_env_p}")
+            endif()
+        endforeach()
+        unset(_spell_env_p)
+        unset(_spell_env_paths)
+    endif()
+endforeach()
+unset(_spell_env_prefix_var)
+
 if(APPLE)
     foreach(_spell_brew_prefix
         "/opt/homebrew/opt/qtbase"
@@ -47,16 +66,24 @@ endif()
 find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Svg Test)
 
 set(SPELL_QT_LIB_DIRS "")
+set(SPELL_QT_PREFIX_DIRS "")
 foreach(_spell_qt_pkg_dir "${Qt6_DIR}" "${Qt6Svg_DIR}")
     if(_spell_qt_pkg_dir)
         get_filename_component(_spell_qt_candidate_lib "${_spell_qt_pkg_dir}/../.." ABSOLUTE)
         if(EXISTS "${_spell_qt_candidate_lib}")
             list(APPEND SPELL_QT_LIB_DIRS "${_spell_qt_candidate_lib}")
         endif()
+        get_filename_component(_spell_qt_candidate_prefix "${_spell_qt_pkg_dir}/../../.." ABSOLUTE)
+        if(EXISTS "${_spell_qt_candidate_prefix}")
+            list(APPEND SPELL_QT_PREFIX_DIRS "${_spell_qt_candidate_prefix}")
+        endif()
     endif()
 endforeach()
+list(REMOVE_DUPLICATES SPELL_QT_LIB_DIRS)
+list(REMOVE_DUPLICATES SPELL_QT_PREFIX_DIRS)
 unset(_spell_qt_pkg_dir)
 unset(_spell_qt_candidate_lib)
+unset(_spell_qt_candidate_prefix)
 
 # ---------------------------------------------------------------------------
 # QScintilla2 (Qt 6)
@@ -65,6 +92,7 @@ find_path(QSCINTILLA_INCLUDE_DIR
     NAMES Qsci/qsciscintilla.h
     HINTS
         ${CMAKE_PREFIX_PATH}
+        ${SPELL_QT_PREFIX_DIRS}
         /opt/homebrew/opt/qscintilla2
         /usr/local/opt/qscintilla2
     PATH_SUFFIXES
@@ -88,6 +116,8 @@ find_library(QSCINTILLA_LIBRARY
         qscintilla2
     HINTS
         ${CMAKE_PREFIX_PATH}
+        ${SPELL_QT_PREFIX_DIRS}
+        ${SPELL_QT_LIB_DIRS}
         /opt/homebrew/opt/qscintilla2
         /usr/local/opt/qscintilla2
     PATH_SUFFIXES
@@ -115,6 +145,26 @@ if(NOT QSCINTILLA_INCLUDE_DIR OR NOT QSCINTILLA_LIBRARY)
 endif()
 
 get_filename_component(QSCINTILLA_LIB_DIR "${QSCINTILLA_LIBRARY}" DIRECTORY)
+
+set(QSCINTILLA_RUNTIME_DLL "")
+if(WIN32)
+    find_file(QSCINTILLA_RUNTIME_DLL
+        NAMES
+            qscintilla2_qt6.dll
+            qscintilla2-qt6.dll
+            qscintilla2_qt6d.dll
+            qscintilla2-qt6d.dll
+        HINTS
+            "${QSCINTILLA_LIB_DIR}"
+            "${QSCINTILLA_LIB_DIR}/../bin"
+            ${CMAKE_PREFIX_PATH}
+            ${SPELL_QT_PREFIX_DIRS}
+        PATH_SUFFIXES
+            ""
+            bin
+            lib
+    )
+endif()
 
 # ---------------------------------------------------------------------------
 # spell_core Rust Core Library
@@ -551,6 +601,15 @@ else()
                 VERBATIM
             )
         endif()
+        if(QSCINTILLA_RUNTIME_DLL)
+            add_custom_command(TARGET BeatrixLeslieIDE POST_BUILD
+                COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                    "${QSCINTILLA_RUNTIME_DLL}"
+                    "$<TARGET_FILE_DIR:BeatrixLeslieIDE>/"
+                COMMENT "Copying QScintilla2 runtime DLL next to BeatrixLeslieIDE.exe"
+                VERBATIM
+            )
+        endif()
     elseif(UNIX)
         set_target_properties(BeatrixLeslieIDE PROPERTIES
             BUILD_WITH_INSTALL_RPATH OFF
@@ -600,12 +659,31 @@ elseif(WIN32)
             VERBATIM
         )
     endif()
+    if(QSCINTILLA_RUNTIME_DLL)
+        add_custom_command(TARGET SpellQtTests POST_BUILD
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                "${QSCINTILLA_RUNTIME_DLL}"
+                "$<TARGET_FILE_DIR:SpellQtTests>/"
+            COMMENT "Copying QScintilla2 runtime DLL next to SpellQtTests.exe"
+            VERBATIM
+        )
+    endif()
 endif()
 
 add_test(NAME SpellQtTests COMMAND SpellQtTests)
 set_tests_properties(SpellQtTests PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen;SPELL_EPHEMERAL_KEYRING=1"
 )
+if(WIN32)
+    foreach(_spell_qt_prefix ${SPELL_QT_PREFIX_DIRS})
+        if(EXISTS "${_spell_qt_prefix}/bin")
+            set_property(TEST SpellQtTests APPEND PROPERTY
+                ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${_spell_qt_prefix}/bin"
+            )
+        endif()
+    endforeach()
+    unset(_spell_qt_prefix)
+endif()
 
 # ---------------------------------------------------------------------------
 # Portable Install Layout (cmake --install <build> --prefix <dist>)
@@ -660,6 +738,11 @@ elseif(WIN32)
             DESTINATION bin
         )
     endif()
+    if(QSCINTILLA_RUNTIME_DLL)
+        install(FILES "${QSCINTILLA_RUNTIME_DLL}"
+            DESTINATION bin
+        )
+    endif()
     install(FILES ${SPELL_BUNDLE_RESOURCES}
         DESTINATION bin/Resources
     )
@@ -682,5 +765,8 @@ message(STATUS "BeatrixLeslie IDE ${PROJECT_VERSION} configuration summary:")
 message(STATUS "  Qt6 version:         ${Qt6_VERSION}")
 message(STATUS "  QScintilla include:  ${QSCINTILLA_INCLUDE_DIR}")
 message(STATUS "  QScintilla library:  ${QSCINTILLA_LIBRARY}")
+if(WIN32)
+    message(STATUS "  QScintilla runtime:  ${QSCINTILLA_RUNTIME_DLL}")
+endif()
 message(STATUS "  spell_core library:  ${SPELL_CORE_LIBRARY}")
 message(STATUS "  SPELL_BUILD_RUST:    ${SPELL_BUILD_RUST}")

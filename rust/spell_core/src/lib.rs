@@ -25,7 +25,6 @@ pub mod tools;
 pub mod transport;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
-pub mod upstream_compat;
 
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
@@ -535,7 +534,7 @@ mod tests {
         let second_read = pin_cache
             .read_file_pinned("call_b", &sub_file, None, None)
             .unwrap();
-        assert!(second_read.starts_with(&format!("<{} ", crate::upstream_compat::DUPLICATE_FILE_REF_TAG)));
+        assert!(second_read.starts_with(&format!("<{} ", crate::tools::DUPLICATE_FILE_REF_TAG)));
         assert!(second_read.contains("sha256=\""));
 
         // Re-evaluating `call_a` returns the exact pinned full text
@@ -802,7 +801,7 @@ mod tests {
     }
 
     #[test]
-    fn test_gate03_messages_zero_immutable_across_turns_tags_and_compaction() {
+    fn test_messages_zero_immutable_across_turns_tags_and_compaction() {
         use crate::tags::ConversationTag;
         use crate::tools::{build_clean_system_prompt, ToolPermissionPolicy};
         use sha2::{Digest, Sha256};

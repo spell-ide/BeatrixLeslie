@@ -47,7 +47,6 @@ struct DelegationFileSummary {
  */
 struct DelegationMeta {
     static constexpr const char* kCommentPrefix = "<!-- spell_delegation_meta:";
-    static constexpr const char* kAltCommentPrefix = "<!-- beatrix_delegation_meta:";
     static constexpr const char* kCommentSuffix = "-->";
 
     QString undoId;
@@ -112,36 +111,30 @@ struct DelegationMeta {
     }
 
     /**
-     * Parses `<!-- spell_delegation_meta: {...} -->` (or legacy fallback)
+     * Parses `<!-- spell_delegation_meta: {...} -->`
      * embedded in tool output or delegation event text.
      */
     static std::optional<DelegationMeta> parseFromText(const QString& text) {
-        const auto extractWithPrefix = [&text](QLatin1StringView prefix) -> std::optional<DelegationMeta> {
-            const qsizetype start = text.lastIndexOf(prefix);
-            if (start < 0) {
-                return std::nullopt;
-            }
-            const qsizetype jsonStart = start + prefix.size();
-            const qsizetype endRel = text.indexOf(QLatin1StringView(kCommentSuffix), jsonStart);
-            if (endRel < 0) {
-                return std::nullopt;
-            }
-            const QString jsonSlice = text.mid(jsonStart, endRel - jsonStart).trimmed();
-            if (jsonSlice.isEmpty()) {
-                return std::nullopt;
-            }
-            QJsonParseError err{};
-            const QJsonDocument doc = QJsonDocument::fromJson(jsonSlice.toUtf8(), &err);
-            if (err.error != QJsonParseError::NoError || !doc.isObject()) {
-                return std::nullopt;
-            }
-            return fromJson(doc.object());
-        };
-
-        if (auto parsed = extractWithPrefix(QLatin1StringView(kCommentPrefix))) {
-            return parsed;
+        const QLatin1StringView prefix(kCommentPrefix);
+        const qsizetype start = text.lastIndexOf(prefix);
+        if (start < 0) {
+            return std::nullopt;
         }
-        return extractWithPrefix(QLatin1StringView(kAltCommentPrefix));
+        const qsizetype jsonStart = start + prefix.size();
+        const qsizetype endRel = text.indexOf(QLatin1StringView(kCommentSuffix), jsonStart);
+        if (endRel < 0) {
+            return std::nullopt;
+        }
+        const QString jsonSlice = text.mid(jsonStart, endRel - jsonStart).trimmed();
+        if (jsonSlice.isEmpty()) {
+            return std::nullopt;
+        }
+        QJsonParseError err{};
+        const QJsonDocument doc = QJsonDocument::fromJson(jsonSlice.toUtf8(), &err);
+        if (err.error != QJsonParseError::NoError || !doc.isObject()) {
+            return std::nullopt;
+        }
+        return fromJson(doc.object());
     }
 
     /**
@@ -174,22 +167,19 @@ struct DelegationMeta {
     /** Removes embedded delegation metadata HTML comments from user-visible text. */
     static QString stripMetadataComment(const QString& text) {
         QString out = text;
-        const auto stripPrefix = [&out](QLatin1StringView prefix) {
-            while (true) {
-                const qsizetype start = out.indexOf(prefix);
-                if (start < 0) {
-                    break;
-                }
-                const qsizetype end = out.indexOf(QLatin1StringView(kCommentSuffix), start + prefix.size());
-                if (end < 0) {
-                    out.remove(start, out.size() - start);
-                    break;
-                }
-                out.remove(start, (end + 3) - start);
+        const QLatin1StringView prefix(kCommentPrefix);
+        while (true) {
+            const qsizetype start = out.indexOf(prefix);
+            if (start < 0) {
+                break;
             }
-        };
-        stripPrefix(QLatin1StringView(kCommentPrefix));
-        stripPrefix(QLatin1StringView(kAltCommentPrefix));
+            const qsizetype end = out.indexOf(QLatin1StringView(kCommentSuffix), start + prefix.size());
+            if (end < 0) {
+                out.remove(start, out.size() - start);
+                break;
+            }
+            out.remove(start, (end + 3) - start);
+        }
         return out.trimmed();
     }
 };

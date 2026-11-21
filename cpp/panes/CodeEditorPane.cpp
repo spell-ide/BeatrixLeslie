@@ -17,6 +17,7 @@
 #include <QFileSystemWatcher>
 #include <QFont>
 #include <QFontMetrics>
+#include <QFontMetricsF>
 #include <QFrame>
 #include <QGuiApplication>
 #include <QHBoxLayout>
@@ -39,6 +40,7 @@
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QSet>
+#include <QSignalBlocker>
 #include <QSizePolicy>
 #include <QStackedWidget>
 #include <QTimer>
@@ -67,8 +69,10 @@
 #include <Qsci/qsciscintillabase.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <functional>
+#include <initializer_list>
 #include <utility>
 
 namespace spell {
@@ -194,8 +198,8 @@ public:
         QFont measureFont = QGuiApplication::font();
         measureFont.setPointSizeF(11.5);
         measureFont.setWeight(QFont::DemiBold);
-        const QFontMetrics fm(measureFont);
-        const int textWidth = fm.horizontalAdvance(m_title);
+        const QFontMetricsF fm(measureFont, this);
+        const int textWidth = static_cast<int>(std::ceil(fm.horizontalAdvance(m_title))) + 4;
         const int chromeWidth = (2 * kTabPadH) + kTabSpacing + kTabSlotSize + kTabDividerWidth;
         const int preferredWidth = chromeWidth + std::max(8, textWidth);
         return QSize(std::min(kTabMaxWidth, preferredWidth), kTopBarHeight);

@@ -63,7 +63,7 @@ QVector<TermCell> fitCells(const QVector<TermCell>& cells, int targetWidth) {
         out.resize(targetWidth, TermCell::blank());
         return out;
     }
-    out.assign(cells.cbegin(), cells.cbegin() + targetWidth);
+    out = cells.mid(0, targetWidth);
     if (targetWidth > 0 && out.back().width == 2) {
         // A wide glyph cut in half at the right margin becomes blank.
         out.back() = TermCell::blank();

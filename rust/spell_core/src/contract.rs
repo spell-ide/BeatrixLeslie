@@ -497,12 +497,12 @@ pub fn resolve_prompt_cache_key(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum KvCacheSlot {
-    Slot0InteractiveChat,
-    Slot1BackgroundTimerEval { seq: u64 },
-    Slot2CriticReviewer { seq: u64 },
+    InteractiveChat,
+    BackgroundTimerEval { seq: u64 },
+    CriticReviewer { seq: u64 },
 }
 
-/// Strips any slot prefix (`slot0:`, `slot1:`, `slot2:`) and any `:epoch<N>` / `:tick_<N>` / `:review_<N>`
+/// Strips any role prefix (`chat:`, `timer:`, `critic:`) and any `:epoch<N>` / `:tick_<N>` / `:review_<N>`
 /// suffix to recover the canonical base thread key.
 pub fn derive_slot_base_thread_key(thread_id: &str) -> String {
     let trimmed = thread_id.trim();
@@ -510,9 +510,9 @@ pub fn derive_slot_base_thread_key(thread_id: &str) -> String {
         return "default".to_string();
     }
     let without_slot = trimmed
-        .strip_prefix("slot0:")
-        .or_else(|| trimmed.strip_prefix("slot1:"))
-        .or_else(|| trimmed.strip_prefix("slot2:"))
+        .strip_prefix("chat:")
+        .or_else(|| trimmed.strip_prefix("timer:"))
+        .or_else(|| trimmed.strip_prefix("critic:"))
         .unwrap_or(trimmed);
     let without_epoch = without_slot
         .split_once(":epoch")
@@ -541,19 +541,19 @@ pub fn resolve_slot_prompt_cache_key(
 ) -> String {
     let base_thread = derive_slot_base_thread_key(thread_id);
     match slot {
-        KvCacheSlot::Slot0InteractiveChat => {
+        KvCacheSlot::InteractiveChat => {
             let base_key = resolve_prompt_cache_key(
                 &base_thread,
                 compaction_epoch,
                 epoch_cache_key_suffix,
             );
-            format!("slot0:{base_key}")
+            format!("chat:{base_key}")
         }
-        KvCacheSlot::Slot1BackgroundTimerEval { seq } => {
-            format!("slot1:{base_thread}:tick_{seq}")
+        KvCacheSlot::BackgroundTimerEval { seq } => {
+            format!("timer:{base_thread}:tick_{seq}")
         }
-        KvCacheSlot::Slot2CriticReviewer { seq } => {
-            format!("slot2:{base_thread}:review_{seq}")
+        KvCacheSlot::CriticReviewer { seq } => {
+            format!("critic:{base_thread}:review_{seq}")
         }
     }
 }

@@ -28,6 +28,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <utility>
 
 namespace spell {
 namespace {
@@ -235,7 +236,7 @@ private:
             flush();
             m_hasPending = true;
             m_pendingKind = kind;
-            m_pending.assign(text.begin(), text.end());
+            m_pending = text.toString();
         }
     }
 

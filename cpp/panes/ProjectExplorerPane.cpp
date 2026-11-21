@@ -34,7 +34,6 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPalette>
-#include <QPushButton>
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QSet>
@@ -48,6 +47,7 @@
 #include <array>
 #include <cmath>
 #include <concepts>
+#include <cstddef>
 #include <functional>
 #include <utility>
 
@@ -387,26 +387,6 @@ QString settingsShortcutHint() {
     return seq.isEmpty() ? QStringLiteral("Settings") : QStringLiteral("Settings (%1)").arg(seq);
 }
 
-QString onlineModeShortLabel(const QString& mode) {
-    if (mode == QLatin1StringView("curated")) {
-        return QStringLiteral("Curated");
-    }
-    if (mode == QLatin1StringView("open_web")) {
-        return QStringLiteral("Open Web");
-    }
-    return QStringLiteral("Air-Gapped");
-}
-
-QString onlineModeDescription(const QString& mode) {
-    if (mode == QLatin1StringView("curated")) {
-        return QStringLiteral("Curated Allowlist");
-    }
-    if (mode == QLatin1StringView("open_web")) {
-        return QStringLiteral("Open Web (Ask per Domain)");
-    }
-    return QStringLiteral("Air-Gapped (Offline)");
-}
-
 bool pathsEqual(const QString& a, const QString& b) {
     if (a.isEmpty() || b.isEmpty()) {
         return false;
@@ -692,15 +672,8 @@ struct ProjectExplorerPane::Impl {
     QWidget* modelRow = nullptr;
     ElidedLabel* modelValueLabel = nullptr;
 
-    QWidget* networkRow = nullptr;
-    QPushButton* networkPillBtn = nullptr;
-    SpellIconButton* airGapBtn = nullptr;
-
     QWidget* messageRow = nullptr;
     ElidedLabel* messageValueLabel = nullptr;
-
-    QWidget* modeRow = nullptr;
-    QPushButton* modePillBtn = nullptr;
 
     QWidget* tagsRow = nullptr;
     ElidedLabel* tagsValueLabel = nullptr;
@@ -785,11 +758,9 @@ struct ProjectExplorerPane::Impl {
     QString endpointBaseUrl;
     QString engineError;
     QString modelId;
-    QString onlineResearchMode = QStringLiteral("offline");
     bool isAgentBusy = false;
     double decodeTokS = 0.0;
     qint64 activePromptTokens = 0;
-    bool stageWriteMode = false;
     QString activeTagsText;
     QString armedTimersText;
     int pendingTerminalApprovalsCount = 0;
@@ -842,11 +813,10 @@ struct ProjectExplorerPane::Impl {
         subLayout->setContentsMargins(0, 0, 0, 0);
         subLayout->setSpacing(0);
 
-        // Top bar (34px): right-aligned "Projects" title only (window buttons float on left on macOS)
+        // Top bar (34px): left-aligned "BEATRIXLESLIE IDE" title (window buttons float on left on macOS)
         infoTopBar = new QWidget(infoSubpanel);
         infoTopBar->setObjectName(QStringLiteral("spellInfoTopBar"));
         infoTopBar->setFixedHeight(34);
-        installWindowDragRegion(infoTopBar);
         installWindowDragRegion(infoTopBar);
         auto* topBarLayout = new QHBoxLayout(infoTopBar);
 #ifdef __APPLE__
@@ -899,50 +869,7 @@ struct ProjectExplorerPane::Impl {
         }
         rowsLayout->addWidget(modelRow);
 
-        // 3. Network (monochrome pill + optional lock-shield Air-Gap Now button)
-        networkRow = new QWidget(infoRowsContainer);
-        {
-            auto* l = new QHBoxLayout(networkRow);
-            l->setContentsMargins(4, 1, 4, 1);
-            l->setSpacing(5);
-            l->addWidget(makeInfoKeyLabel(QStringLiteral("Network"), networkRow), 0, Qt::AlignVCenter);
-
-            networkPillBtn = new QPushButton(QStringLiteral("Air-Gapped"), networkRow);
-            networkPillBtn->setObjectName(QStringLiteral("spellNetworkPillBtn"));
-            networkPillBtn->setCursor(Qt::PointingHandCursor);
-            networkPillBtn->setFocusPolicy(Qt::NoFocus);
-            networkPillBtn->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
-            networkPillBtn->setIconSize(QSize(10, 10));
-            networkPillBtn->setContextMenuPolicy(Qt::CustomContextMenu);
-            QObject::connect(networkPillBtn, &QPushButton::clicked, owner, [this]() {
-                emit owner->openOnlineResearchRequested();
-            });
-            QObject::connect(networkPillBtn, &QWidget::customContextMenuRequested, owner, [this](const QPoint& pos) {
-                showNetworkContextMenu(networkPillBtn->mapToGlobal(pos));
-            });
-            l->addWidget(networkPillBtn, 0, Qt::AlignVCenter);
-
-            airGapBtn = new SpellIconButton(
-                QStringLiteral("lock-shield"),
-                QStringLiteral("Air-Gap Now"),
-                BadgeTone::Neutral,
-                networkRow);
-            airGapBtn->setObjectName(QStringLiteral("spellAirGapNowBtn"));
-            airGapBtn->setIconPixelSize(11);
-            airGapBtn->setFixedSize(18, 18);
-            airGapBtn->setFocusPolicy(Qt::NoFocus);
-            airGapBtn->setVisible(false);
-            QObject::connect(airGapBtn, &QToolButton::clicked, owner, [this]() {
-                emit owner->airGapNowRequested();
-            });
-            l->addWidget(airGapBtn, 0, Qt::AlignVCenter);
-
-            l->addStretch(1);
-        }
-        rowsLayout->addWidget(networkRow);
-        networkRow->setVisible(false); // Network posture lives only in Settings -> Online Research
-
-        // 4. Message
+        // 3. Message
         messageRow = new QWidget(infoRowsContainer);
         {
             auto* l = new QHBoxLayout(messageRow);
@@ -954,29 +881,7 @@ struct ProjectExplorerPane::Impl {
         }
         rowsLayout->addWidget(messageRow);
 
-        // 5. Mode (clickable monochrome outline pill toggling stageWriteMode)
-        modeRow = new QWidget(infoRowsContainer);
-        {
-            auto* l = new QHBoxLayout(modeRow);
-            l->setContentsMargins(4, 1, 4, 1);
-            l->setSpacing(5);
-            l->addWidget(makeInfoKeyLabel(QStringLiteral("Mode"), modeRow), 0, Qt::AlignVCenter);
-
-            modePillBtn = new QPushButton(QStringLiteral("Write"), modeRow);
-            modePillBtn->setObjectName(QStringLiteral("spellModePillBtn"));
-            modePillBtn->setCursor(Qt::PointingHandCursor);
-            modePillBtn->setFocusPolicy(Qt::NoFocus);
-            modePillBtn->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
-            QObject::connect(modePillBtn, &QPushButton::clicked, owner, [this]() {
-                emit owner->toggleStageWriteRequested(!stageWriteMode);
-            });
-            l->addWidget(modePillBtn, 0, Qt::AlignVCenter);
-            l->addStretch(1);
-        }
-        rowsLayout->addWidget(modeRow);
-        modeRow->setVisible(false); // Not part of the Spell IDE info panel
-
-        // 6. Optional Tags row
+        // 4. Optional Tags row
         tagsRow = new QWidget(infoRowsContainer);
         {
             auto* l = new QHBoxLayout(tagsRow);
@@ -1236,9 +1141,6 @@ struct ProjectExplorerPane::Impl {
 
     void updateInfoSubpanelVisuals() {
         const UiPalette u = ThemeManager::instance().ui();
-        const QColor solidElevated = compositeOver(u.elevatedSurface, u.background);
-        const QColor solidSelected = compositeOver(u.selectedFill, u.background);
-        const QColor solidBorder = compositeOver(u.subtleBorder, u.background);
 
         // 1. Server row
         const QString host = formatEndpointHost(endpointBaseUrl);
@@ -1286,47 +1188,7 @@ struct ProjectExplorerPane::Impl {
             modelValueLabel->setToolTip(QStringLiteral("No model configured"));
         }
 
-        // 3. Network row (monochrome pill + optional lock-shield button)
-        const bool isOnlineNet =
-            (onlineResearchMode == QLatin1StringView("curated") ||
-             onlineResearchMode == QLatin1StringView("open_web"));
-        const QString netShort = onlineModeShortLabel(onlineResearchMode);
-        const QColor netFg = isOnlineNet ? u.textPrimary : u.textSecondary;
-        const QColor netBg = isOnlineNet ? solidElevated : QColor(Qt::transparent);
-        const QColor netHoverBg = isOnlineNet ? solidSelected : solidElevated;
-        const QColor netBorder = isOnlineNet ? u.selectedBorder : solidBorder;
-
-        networkPillBtn->setText(netShort);
-        networkPillBtn->setFont(makeMonoFont(9.5, QFont::DemiBold));
-        networkPillBtn->setIcon(icons::vectorIcon(
-            isOnlineNet ? QStringLiteral("globe") : QStringLiteral("lock"), netFg, 10));
-        networkPillBtn->setStyleSheet(QStringLiteral(
-            "QPushButton#spellNetworkPillBtn {"
-            "  background-color: %1;"
-            "  color: %2;"
-            "  border: 1px solid %3;"
-            "  border-radius: 4px;"
-            "  padding: 1px 6px;"
-            "  font-size: 9.5pt;"
-            "  font-weight: 600;"
-            "}"
-            "QPushButton#spellNetworkPillBtn:hover {"
-            "  background-color: %4;"
-            "  color: %5;"
-            "  border-color: %6;"
-            "}")
-            .arg(netBg.alpha() == 0 ? QStringLiteral("transparent") : qssColor(netBg),
-                 qssColor(netFg),
-                 qssColor(netBorder),
-                 qssColor(netHoverBg),
-                 qssColor(u.textPrimary),
-                 qssColor(u.selectedBorder)));
-        networkPillBtn->setToolTip(
-            QStringLiteral("%1 — Click to configure Online Research").arg(onlineModeDescription(onlineResearchMode)));
-        airGapBtn->setVisible(false);
-        (void)isOnlineNet;
-
-        // 4. Message row
+        // 3. Message row
         QString msgText;
         if (isAgentBusy) {
             if (decodeTokS > 0.0) {
@@ -1344,36 +1206,7 @@ struct ProjectExplorerPane::Impl {
         setElidedColor(messageValueLabel, isAgentBusy ? u.textPrimary : u.textSecondary);
         messageValueLabel->setToolTip(msgText);
 
-        // 5. Mode row (clickable compact monochrome outline pill)
-        const QString modeText = stageWriteMode ? QStringLiteral("Stage (Review)") : QStringLiteral("Write");
-        const QColor modeBg = stageWriteMode ? solidSelected : QColor(Qt::transparent);
-        const QColor modeBorder = stageWriteMode ? u.selectedBorder : solidBorder;
-        modePillBtn->setText(modeText);
-        modePillBtn->setFont(makeMonoFont(10.0, QFont::DemiBold));
-        modePillBtn->setStyleSheet(QStringLiteral(
-            "QPushButton#spellModePillBtn {"
-            "  background-color: %1;"
-            "  color: %2;"
-            "  border: 1px solid %3;"
-            "  border-radius: 4px;"
-            "  padding: 1px 6px;"
-            "  font-size: 10pt;"
-            "  font-weight: 600;"
-            "}"
-            "QPushButton#spellModePillBtn:hover {"
-            "  background-color: %4;"
-            "  border-color: %5;"
-            "}")
-            .arg(modeBg.alpha() == 0 ? QStringLiteral("transparent") : qssColor(modeBg),
-                 qssColor(u.textPrimary),
-                 qssColor(modeBorder),
-                 qssColor(solidElevated),
-                 qssColor(u.selectedBorder)));
-        modePillBtn->setToolTip(stageWriteMode
-            ? QStringLiteral("Stage (Review): edits are staged for review before applying. Click to switch to Write.")
-            : QStringLiteral("Write: edits apply directly. Click to switch to Stage (Review)."));
-
-        // 6. Optional Tags row
+        // 4. Optional Tags row
         const bool hasTags = !activeTagsText.isEmpty();
         tagsRow->setVisible(hasTags);
         if (hasTags) {
@@ -1896,27 +1729,6 @@ struct ProjectExplorerPane::Impl {
         emit owner->conversationLinkedFolderChanged(threadId, QString());
     }
 
-    void showNetworkContextMenu(const QPoint& globalPos) {
-        const UiPalette u = ThemeManager::instance().ui();
-        QMenu menu(owner);
-        QAction* configureAct = menu.addAction(
-            icons::vectorIcon(QStringLiteral("globe"), u.textPrimary, 14),
-            QStringLiteral("Configure Online Research…"));
-        QObject::connect(configureAct, &QAction::triggered, owner, [this]() {
-            emit owner->openOnlineResearchRequested();
-        });
-        if (onlineResearchMode != QLatin1StringView("offline")) {
-            menu.addSeparator();
-            QAction* airGapAct = menu.addAction(
-                icons::vectorIcon(QStringLiteral("lock-shield"), u.textPrimary, 14),
-                QStringLiteral("Air-Gap Now"));
-            QObject::connect(airGapAct, &QAction::triggered, owner, [this]() {
-                emit owner->airGapNowRequested();
-            });
-        }
-        menu.exec(globalPos);
-    }
-
     void showProjectContextMenu(const QString& projectId, const QPoint& globalPos) {
         const ProjectInfo* proj = findProject(projectId);
         if (!proj) {
@@ -2134,7 +1946,6 @@ struct ProjectExplorerPane::Impl {
         // Propagate theme to custom Spell widgets
         topHairline->applyTheme();
         bottomHairline->applyTheme();
-        airGapBtn->applyTheme();
         addProjectBtn->applyTheme();
         settingsGearBtn->applyTheme();
 
@@ -2290,8 +2101,6 @@ void ProjectExplorerPane::updateSnapshot(const WorkspaceSnapshot& snap) {
 
     const int nextApprovalCount = static_cast<int>(snap.pendingTerminalApprovals.size());
 
-    const QString normalizedOnlineMode = detail::normalizeOnlineMode(snap.onlineResearch.mode);
-
     const bool infoChanged =
         !m_impl->infoInitialized ||
         (m_impl->endpointConfigured != effectiveConfigured) ||
@@ -2299,11 +2108,9 @@ void ProjectExplorerPane::updateSnapshot(const WorkspaceSnapshot& snap) {
         (m_impl->endpointBaseUrl != snap.endpointBaseUrl) ||
         (m_impl->engineError != snap.telemetry.engineError) ||
         (m_impl->modelId != effectiveModel) ||
-        (m_impl->onlineResearchMode != normalizedOnlineMode) ||
         (m_impl->isAgentBusy != snap.isAgentBusy) ||
         (std::abs(m_impl->decodeTokS - snap.telemetry.decodeTokS) > 0.05) ||
         (m_impl->activePromptTokens != snap.telemetry.activePromptTokens) ||
-        (m_impl->stageWriteMode != snap.stageWriteMode) ||
         (m_impl->activeTagsText != nextTagsText) ||
         (m_impl->armedTimersText != nextTimersText) ||
         (m_impl->pendingTerminalApprovalsCount != nextApprovalCount);
@@ -2313,11 +2120,9 @@ void ProjectExplorerPane::updateSnapshot(const WorkspaceSnapshot& snap) {
     m_impl->endpointBaseUrl = snap.endpointBaseUrl;
     m_impl->engineError = snap.telemetry.engineError;
     m_impl->modelId = effectiveModel;
-    m_impl->onlineResearchMode = normalizedOnlineMode;
     m_impl->isAgentBusy = snap.isAgentBusy;
     m_impl->decodeTokS = snap.telemetry.decodeTokS;
     m_impl->activePromptTokens = snap.telemetry.activePromptTokens;
-    m_impl->stageWriteMode = snap.stageWriteMode;
     m_impl->activeTagsText = nextTagsText;
     m_impl->armedTimersText = nextTimersText;
     m_impl->pendingTerminalApprovalsCount = nextApprovalCount;

@@ -404,9 +404,9 @@ impl FixtureTransport {
                     if payload_tail.contains("<unified_diff>")
                         || last_msg_text.contains("Gatekeeper Critic subagent")
                     {
-                        format!("slot2:inferred:{sub_seq}")
+                        format!("critic:inferred:{sub_seq}")
                     } else if payload_tail.contains("<due_timers>") {
-                        format!("slot1:inferred:{sub_seq}")
+                        format!("timer:inferred:{sub_seq}")
                     } else if payload_tail.contains("<workspace_files>") {
                         format!("inferred:prefill:{sub_seq}")
                     } else {
@@ -445,9 +445,9 @@ impl FixtureTransport {
                 .subagent_keyed_responses
                 .iter()
                 .position(|(prefix, _, _)| cache_key.starts_with(prefix));
-            let is_slot2 = cache_key.starts_with("slot2:");
-            let is_slot1 = cache_key.starts_with("slot1:");
-            let is_aux_slot = is_slot2 || is_slot1;
+            let is_critic = cache_key.starts_with("critic:");
+            let is_timer = cache_key.starts_with("timer:");
+            let is_aux_slot = is_critic || is_timer;
 
             let (content, reasoning_content, tool_calls, custom_finish, step_cache_override) =
                 if let Some(pos) = keyed_pos {
@@ -491,13 +491,13 @@ impl FixtureTransport {
                         .find(|m| m.role == "user" || m.role == "tool")
                         .and_then(|m| m.content.as_deref())
                         .unwrap_or("");
-                    let generated = if is_slot2 {
+                    let generated = if is_critic {
                         serde_json::json!({
                             "passed": true,
                             "reason": "Gatekeeper Critic verified diff safety, syntax balance, and rubric invariants."
                         })
                         .to_string()
-                    } else if is_slot1 {
+                    } else if is_timer {
                         let compact_line = last_user_text
                             .lines()
                             .find(|l| !l.trim().is_empty())
@@ -505,7 +505,7 @@ impl FixtureTransport {
                             .chars()
                             .take(160)
                             .collect::<String>();
-                        format!("Slot 1 timer triage ready: {compact_line}")
+                        format!("Timer triage ready: {compact_line}")
                     } else if cache_key.contains(":prefill:") {
                         let preview: String = last_user_text
                             .lines()
@@ -1055,7 +1055,7 @@ impl EngineTransport for FixtureTransport {
             // Pop due timers for `thread_key` or `"*"` and append banners to `req.messages.last_mut()`
             // without touching `req.messages[0]`!
             let is_aux_slot =
-                thread_key.starts_with("slot1:") || thread_key.starts_with("slot2:");
+                thread_key.starts_with("timer:") || thread_key.starts_with("critic:");
             let base_thread_key = derive_slot_base_thread_key(&thread_key);
             for timer in &mut guard.timers {
                 let matches_thread = timer.thread_id == thread_key

@@ -36,6 +36,7 @@
 
 #include <algorithm>
 #include <functional>
+#include <utility>
 
 namespace spell {
 

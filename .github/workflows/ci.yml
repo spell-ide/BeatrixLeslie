@@ -1,0 +1,158 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  macos:
+    name: macOS (arm64)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Homebrew dependencies
+        run: |
+          HOMEBREW_NO_AUTO_UPDATE=1 brew install cmake ninja qtbase qtsvg qscintilla2
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust/spell_core
+
+      - name: Verify third-party license notices
+        run: python3 scripts/generate_third_party_licenses.py --check
+
+      - name: Build, deploy Qt, test, and verify loader
+        run: ./scripts/build_and_run.sh --install dist --deploy-qt --test --verify-loader
+
+  linux:
+    name: Linux (Ubuntu 24.04 x86_64)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install APT dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            ninja-build \
+            pkg-config \
+            qt6-base-dev \
+            qt6-svg-dev \
+            libqscintilla2-qt6-dev \
+            libsecret-1-dev \
+            libgl1-mesa-dev \
+            libxkbcommon-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust/spell_core
+
+      - name: Verify third-party license notices
+        run: python3 scripts/generate_third_party_licenses.py --check
+
+      - name: Build, install, test, and verify loader
+        run: ./scripts/build_and_run.sh --install dist --test --verify-loader
+
+  windows:
+    name: Windows (MSVC x86_64)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure MSVC developer command prompt
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust/spell_core
+
+      - name: Install Qt 6
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.7.*'
+          cache: true
+
+      - name: Build and install QScintilla 2.14.1
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $Url = "https://files.pythonhosted.org/packages/source/Q/QScintilla/QScintilla_src-2.14.1.tar.gz"
+          $WorkDir = Join-Path $env:RUNNER_TEMP "qscintilla-build"
+          if (Test-Path -LiteralPath $WorkDir) {
+              Remove-Item -LiteralPath $WorkDir -Recurse -Force
+          }
+          New-Item -ItemType Directory -Path $WorkDir -Force | Out-Null
+          $TarPath = Join-Path $WorkDir "QScintilla_src-2.14.1.tar.gz"
+
+          & curl.exe --fail --location --retry 5 --retry-delay 2 --retry-all-errors -o $TarPath $Url
+          if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
+          }
+
+          & tar -xzf $TarPath -C $WorkDir
+          if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
+          }
+
+          Push-Location (Join-Path $WorkDir "QScintilla_src-2.14.1\src")
+          try {
+              & qmake "CONFIG+=release" "CONFIG-=debug_and_release" qscintilla.pro
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+              & nmake
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+              & nmake install
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } finally {
+              Pop-Location
+          }
+
+          $QtLibDir = (& qmake -query QT_INSTALL_LIBS).Trim()
+          $QtBinDir = (& qmake -query QT_INSTALL_BINS).Trim()
+          if ($QtLibDir -and $QtBinDir) {
+              $LibDll = Join-Path $QtLibDir "qscintilla2_qt6.dll"
+              if ((Test-Path -LiteralPath $LibDll) -and (Test-Path -LiteralPath $QtBinDir)) {
+                  Copy-Item -LiteralPath $LibDll -Destination (Join-Path $QtBinDir "qscintilla2_qt6.dll") -Force
+              }
+          }
+
+      - name: Verify third-party license notices
+        shell: pwsh
+        run: |
+          & python scripts/generate_third_party_licenses.py --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build, deploy Qt, test, and verify loader
+        shell: pwsh
+        run: .\scripts\build_and_run.ps1 -InstallPrefix dist -DeployQt -Test -VerifyLoader

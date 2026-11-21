@@ -321,8 +321,8 @@ struct EngineSettingsPane::Impl {
     QLabel* primaryModelMetaLabel = nullptr;
     QComboBox* subagentModelCombo = nullptr;
     QLabel* subagentModelHintLabel = nullptr;
-    QCheckBox* slot2CriticCheck = nullptr;
-    QLabel* slot2CriticHintLabel = nullptr;
+    QCheckBox* criticCheck = nullptr;
+    QLabel* criticHintLabel = nullptr;
     QPushButton* saveEndpointButton = nullptr;
     QLabel* saveFeedbackLabel = nullptr;
 
@@ -340,7 +340,7 @@ struct EngineSettingsPane::Impl {
     QString lastAppliedBaseUrl;
     QString lastAppliedPrimaryModel;
     QString lastAppliedSubagentModel;
-    bool lastAppliedSlot2Critic = false;
+    bool lastAppliedCritic = false;
 
     void setErrorText(const QString& text) {
         const QString trimmed = text.trimmed();
@@ -660,6 +660,11 @@ struct EngineSettingsPane::Impl {
         if (!subagentModelDirty && subagentModelCombo && !isComboFocused(subagentModelCombo)) {
             const QSignalBlocker blocker(subagentModelCombo);
             subagentModelCombo->setEditText(store->subagentModelId().trimmed());
+        }
+        if (criticCheck) {
+            const QSignalBlocker blocker(criticCheck);
+            criticCheck->setChecked(store->criticEnabled());
+            lastAppliedCritic = store->criticEnabled();
         }
     }
 
@@ -1393,18 +1398,18 @@ EngineSettingsPane::EngineSettingsPane(SpellCoreClient* client,
         m_impl->hairlines.append(divider1);
         card->addWidget(divider1);
 
-        m_impl->slot2CriticCheck = new QCheckBox(
+        m_impl->criticCheck = new QCheckBox(
             QStringLiteral("Enable Gatekeeper Critic review"), this);
-        m_impl->slot2CriticCheck->setObjectName(QStringLiteral("engineSlot2CriticCheck"));
-        card->addWidget(m_impl->slot2CriticCheck);
+        m_impl->criticCheck->setObjectName(QStringLiteral("engineCriticCheck"));
+        card->addWidget(m_impl->criticCheck);
 
-        m_impl->slot2CriticHintLabel = new QLabel(
+        m_impl->criticHintLabel = new QLabel(
             QStringLiteral("When enabled, staged file mutations undergo an isolated LLM critic pass before "
                            "auto-commit using the configured endpoint and subagent model."),
             this);
-        m_impl->slot2CriticHintLabel->setWordWrap(true);
-        setRoleProperty(m_impl->slot2CriticHintLabel, "hint");
-        card->addWidget(m_impl->slot2CriticHintLabel);
+        m_impl->criticHintLabel->setWordWrap(true);
+        setRoleProperty(m_impl->criticHintLabel, "hint");
+        card->addWidget(m_impl->criticHintLabel);
 
         auto* divider2 = new SpellHairline(Qt::Horizontal, this);
         m_impl->hairlines.append(divider2);
@@ -1522,14 +1527,14 @@ EngineSettingsPane::EngineSettingsPane(SpellCoreClient* client,
         m_impl->subagentModelDirty = true;
     });
 
-    connect(m_impl->slot2CriticCheck, &QCheckBox::toggled, this, [this](bool enabled) {
-        m_impl->lastAppliedSlot2Critic = enabled;
+    connect(m_impl->criticCheck, &QCheckBox::toggled, this, [this](bool enabled) {
+        m_impl->lastAppliedCritic = enabled;
         if (m_impl->store) {
-            m_impl->store->setSlot2CriticEnabled(enabled);
+            m_impl->store->setCriticEnabled(enabled);
             m_impl->store->sync();
         }
         if (m_impl->client) {
-            m_impl->client->setSlot2CriticEnabled(enabled);
+            m_impl->client->setCriticEnabled(enabled);
         }
     });
 
@@ -1578,9 +1583,9 @@ EngineSettingsPane::EngineSettingsPane(SpellCoreClient* client,
             m_impl->subagentModelCombo->setEditText(m_impl->store->subagentModelId().trimmed());
         }
         {
-            const QSignalBlocker blocker(m_impl->slot2CriticCheck);
-            m_impl->slot2CriticCheck->setChecked(m_impl->store->slot2CriticEnabled());
-            m_impl->lastAppliedSlot2Critic = m_impl->store->slot2CriticEnabled();
+            const QSignalBlocker blocker(m_impl->criticCheck);
+            m_impl->criticCheck->setChecked(m_impl->store->criticEnabled());
+            m_impl->lastAppliedCritic = m_impl->store->criticEnabled();
         }
         m_impl->lastAppliedBaseUrl = m_impl->store->endpointBaseUrl().trimmed();
         m_impl->lastAppliedPrimaryModel = m_impl->store->modelId().trimmed();
@@ -1594,7 +1599,7 @@ EngineSettingsPane::EngineSettingsPane(SpellCoreClient* client,
         storeSeed.effectiveSubagentModelId = m_impl->lastAppliedSubagentModel.isEmpty()
                                                  ? m_impl->lastAppliedPrimaryModel
                                                  : m_impl->lastAppliedSubagentModel;
-        storeSeed.slot2CriticEnabled = m_impl->lastAppliedSlot2Critic;
+        storeSeed.criticEnabled = m_impl->lastAppliedCritic;
         m_impl->lastSnapshot = storeSeed;
         m_impl->updateSummaryRows(storeSeed);
         if (m_impl->refreshStatusButton) {
@@ -1680,16 +1685,16 @@ void EngineSettingsPane::updateSnapshot(const WorkspaceSnapshot& snap) {
         }
     }
 
-    if (m_impl->slot2CriticCheck &&
-        (!m_impl->hasInitializedFromSnapshot || snap.slot2CriticEnabled != m_impl->lastAppliedSlot2Critic)) {
-        const QSignalBlocker blocker(m_impl->slot2CriticCheck);
-        m_impl->slot2CriticCheck->setChecked(snap.slot2CriticEnabled);
+    if (m_impl->criticCheck &&
+        (!m_impl->hasInitializedFromSnapshot || snap.criticEnabled != m_impl->lastAppliedCritic)) {
+        const QSignalBlocker blocker(m_impl->criticCheck);
+        m_impl->criticCheck->setChecked(snap.criticEnabled);
     }
 
     m_impl->lastAppliedBaseUrl = snapUrl;
     m_impl->lastAppliedPrimaryModel = snapModel;
     m_impl->lastAppliedSubagentModel = snapSubModel;
-    m_impl->lastAppliedSlot2Critic = snap.slot2CriticEnabled;
+    m_impl->lastAppliedCritic = snap.criticEnabled;
     m_impl->hasInitializedFromSnapshot = true;
 
     m_impl->updateSummaryRows(snap);

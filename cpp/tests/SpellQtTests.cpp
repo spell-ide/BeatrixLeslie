@@ -57,6 +57,7 @@
 #include <Qsci/qsciscintilla.h>
 
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <optional>
 
@@ -395,7 +396,7 @@ void SpellQtTests::testModelsSnapshotJsonDecoding() {
         {QStringLiteral("total_completion_tokens"), 3500},
         {QStringLiteral("total_cached_tokens"), 8000},
         {QStringLiteral("compaction_epoch"), 2},
-        {QStringLiteral("slot2_critic_enabled"), true},
+        {QStringLiteral("critic_enabled"), true},
     });
     const TelemetrySnapshot camelTel = TelemetrySnapshot::fromJson(QJsonObject{
         {QStringLiteral("endpointConfigured"), true},
@@ -411,7 +412,7 @@ void SpellQtTests::testModelsSnapshotJsonDecoding() {
         {QStringLiteral("totalCompletionTokens"), 3500},
         {QStringLiteral("totalCachedTokens"), 8000},
         {QStringLiteral("compactionEpoch"), 2},
-        {QStringLiteral("slot2CriticEnabled"), true},
+        {QStringLiteral("criticEnabled"), true},
     });
     QCOMPARE(snakeTel, camelTel);
     QCOMPARE(snakeTel.endpointLatencyMs, 42);
@@ -566,7 +567,7 @@ void SpellQtTests::testModelsSnapshotJsonDecoding() {
             {QStringLiteral("subagent_protocol"), QStringLiteral("native_tool_calls")},
             {QStringLiteral("autonomous_loop_enabled"), true},
             {QStringLiteral("max_agent_steps"), 16},
-            {QStringLiteral("slot2_critic_enabled"), true},
+            {QStringLiteral("critic_enabled"), true},
             {QStringLiteral("is_agent_busy"), false},
         }},
     };
@@ -688,7 +689,7 @@ void SpellQtTests::testModelsSnapshotJsonDecoding() {
         {QStringLiteral("subagentProtocol"), QStringLiteral("nativeToolCalls")},
         {QStringLiteral("autonomousLoopEnabled"), true},
         {QStringLiteral("maxAgentSteps"), 16},
-        {QStringLiteral("slot2CriticEnabled"), true},
+        {QStringLiteral("criticEnabled"), true},
         {QStringLiteral("isAgentBusy"), false},
     };
 
@@ -739,8 +740,8 @@ void SpellQtTests::testModelsSnapshotJsonDecoding() {
     QCOMPARE(snapCamel.subagentProtocol, QStringLiteral("native"));
     QCOMPARE(snapSnake.maxAgentSteps, 16);
     QCOMPARE(snapCamel.maxAgentSteps, 16);
-    QVERIFY(snapSnake.slot2CriticEnabled);
-    QVERIFY(snapCamel.slot2CriticEnabled);
+    QVERIFY(snapSnake.criticEnabled);
+    QVERIFY(snapCamel.criticEnabled);
 
     // Roundtrip toJson -> fromJson
     const WorkspaceSnapshot roundtripped = WorkspaceSnapshot::fromJson(snapSnake.toJson());

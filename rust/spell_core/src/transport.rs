@@ -681,7 +681,7 @@ fn find_header_delimiter(buf: &[u8]) -> Option<(usize, usize)> {
 }
 
 /// Parses both `HTTP/1.1 200 OK` and `HTTP/2 200` status lines and lowercased headers.
-#[allow(dead_code)]
+#[cfg(unix)]
 pub(crate) fn parse_http_status_and_headers(
     raw_block: &[u8],
 ) -> Result<(u16, String, HashMap<String, String>), TransportError> {

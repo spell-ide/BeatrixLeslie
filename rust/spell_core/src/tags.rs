@@ -1558,7 +1558,7 @@ mod tests {
     }
 
     #[test]
-    fn test_gate02_tag_steer_lexer_toml_and_sampling_wire() {
+    fn test_tag_steer_lexer_toml_and_sampling_wire() {
         let toml_spec = r##"
 [skills.rust_refactor]
 trigger = "@skill:refactor"

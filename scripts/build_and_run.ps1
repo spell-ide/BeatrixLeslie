@@ -30,17 +30,115 @@ function Resolve-WorkspacePath {
 }
 
 function Find-BuiltExecutable {
-    param([string]$BaseBuildDir, [string]$Config)
+    param([string]$BaseBuildDir, [string]$Config, [string]$ExeName = "BeatrixLeslieIDE.exe")
     $Candidates = @(
-        (Join-Path $BaseBuildDir "$Config\BeatrixLeslieIDE.exe"),
-        (Join-Path $BaseBuildDir "BeatrixLeslieIDE.exe")
+        (Join-Path $BaseBuildDir "$Config\$ExeName"),
+        (Join-Path $BaseBuildDir $ExeName)
     )
     foreach ($Candidate in $Candidates) {
         if (Test-Path -LiteralPath $Candidate -PathType Leaf) {
             return $Candidate
         }
     }
-    throw "BeatrixLeslieIDE.exe was not found under '$BaseBuildDir' (checked $($Candidates -join ', '))."
+    throw "$ExeName was not found under '$BaseBuildDir' (checked $($Candidates -join ', '))."
+}
+
+function Find-WinDeployQt {
+    $Cmd = Get-Command windeployqt6, windeployqt -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($null -ne $Cmd) {
+        return $Cmd.Source
+    }
+    foreach ($EnvPrefix in @($env:Qt6_DIR, $env:QT_ROOT_DIR)) {
+        if (-not [string]::IsNullOrWhiteSpace($EnvPrefix)) {
+            foreach ($BinName in @("windeployqt6.exe", "windeployqt.exe")) {
+                $Candidate = Join-Path $EnvPrefix "bin\$BinName"
+                if (Test-Path -LiteralPath $Candidate -PathType Leaf) {
+                    return $Candidate
+                }
+            }
+        }
+    }
+    return $null
+}
+
+function Invoke-WinDeployQtOnTarget {
+    param([string]$WinDeployQtExe, [string]$TargetExe, [string]$Config)
+    $ModeFlag = if ($Config -eq "Debug") { "--debug" } else { "--release" }
+    Write-Host "==> Running windeployqt ($ModeFlag) on $TargetExe"
+    & $WinDeployQtExe $ModeFlag --no-translations --compiler-runtime $TargetExe
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+}
+
+function Test-WindowsRuntimeLayout {
+    param([string]$TargetExe, [bool]$RequireQtDlls)
+    $TargetDir = Split-Path -Parent $TargetExe
+    Write-Host "==> Verifying Windows runtime layout in $TargetDir"
+
+    if (-not (Test-Path -LiteralPath $TargetExe -PathType Leaf)) {
+        throw "Loader verification failed: missing executable '$TargetExe'."
+    }
+
+    $CoreDll = Join-Path $TargetDir "spell_core.dll"
+    $LicenseFile = Join-Path $TargetDir "Resources\THIRD_PARTY_LICENSES.txt"
+    $LogoFile = Join-Path $TargetDir "Resources\AppLogo.jpg"
+
+    if (-not (Test-Path -LiteralPath $CoreDll -PathType Leaf)) {
+        throw "Loader verification failed: missing '$CoreDll' alongside '$TargetExe'."
+    }
+
+    $QsciMatches = @(Get-ChildItem -Path $TargetDir -Filter "qscintilla2*.dll" -File -ErrorAction SilentlyContinue)
+    if ($QsciMatches.Count -eq 0) {
+        throw "Loader verification failed: missing QScintilla2 DLL (qscintilla2_qt6.dll / qscintilla2*.dll) alongside '$TargetExe'."
+    }
+
+    if ($RequireQtDlls) {
+        $QtWidgetsCandidates = @(
+            (Join-Path $TargetDir "Qt6Widgets.dll"),
+            (Join-Path $TargetDir "Qt6Widgetsd.dll")
+        )
+        $FoundQtWidgets = $false
+        foreach ($QtCand in $QtWidgetsCandidates) {
+            if (Test-Path -LiteralPath $QtCand -PathType Leaf) {
+                $FoundQtWidgets = $true
+                break
+            }
+        }
+        if (-not $FoundQtWidgets) {
+            throw "Loader verification failed: missing Qt6Widgets.dll alongside '$TargetExe' after -DeployQt."
+        }
+    }
+
+    if (-not (Test-Path -LiteralPath $LicenseFile -PathType Leaf)) {
+        throw "Loader verification failed: missing '$LicenseFile'."
+    }
+    if (-not (Test-Path -LiteralPath $LogoFile -PathType Leaf)) {
+        throw "Loader verification failed: missing '$LogoFile'."
+    }
+
+    $DumpBin = Get-Command dumpbin -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($null -ne $DumpBin) {
+        $Imports = & $DumpBin.Source /DEPENDENTS $TargetExe
+        if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+        }
+        Write-Host ($Imports | Out-String)
+        if (-not (($Imports | Out-String) -match "spell_core\.dll")) {
+            throw "Loader verification failed: '$TargetExe' PE import table does not reference spell_core.dll."
+        }
+    } else {
+        $ObjDump = Get-Command objdump -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($null -ne $ObjDump) {
+            $Imports = & $ObjDump.Source -p $TargetExe | Select-String "DLL Name:"
+            Write-Host ($Imports | Out-String)
+            if (-not (($Imports | Out-String) -match "spell_core\.dll")) {
+                throw "Loader verification failed: '$TargetExe' PE import table does not reference spell_core.dll."
+            }
+        }
+    }
+
+    Write-Host "==> Windows loader verification passed for $TargetExe"
 }
 
 $ResolvedBuildDir = Resolve-WorkspacePath -InputPath $BuildDir
@@ -58,18 +156,18 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 $AppExe = Find-BuiltExecutable -BaseBuildDir $ResolvedBuildDir -Config $Configuration
-$AppDir = Split-Path -Parent $AppExe
 
+$WinDeployQtExe = $null
 if ($DeployQt) {
-    $WinDeployQt = Get-Command windeployqt6, windeployqt -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($null -ne $WinDeployQt) {
-        Write-Host "==> Running $($WinDeployQt.Name) on $AppExe"
-        & $WinDeployQt.Source --no-translations $AppExe
-        if ($LASTEXITCODE -ne 0) {
-            exit $LASTEXITCODE
-        }
-    } else {
-        Write-Warning "windeployqt was not found on PATH; skipping Qt DLL deployment. Add your Qt6 bin directory to PATH to bundle Qt runtime DLLs."
+    $WinDeployQtExe = Find-WinDeployQt
+    if ($null -eq $WinDeployQtExe) {
+        throw "windeployqt was not found on PATH or under Qt6_DIR / QT_ROOT_DIR. Add your Qt6 bin directory to PATH when passing -DeployQt."
+    }
+    Invoke-WinDeployQtOnTarget -WinDeployQtExe $WinDeployQtExe -TargetExe $AppExe -Config $Configuration
+
+    if ($Test) {
+        $TestExe = Find-BuiltExecutable -BaseBuildDir $ResolvedBuildDir -Config $Configuration -ExeName "SpellQtTests.exe"
+        Invoke-WinDeployQtOnTarget -WinDeployQtExe $WinDeployQtExe -TargetExe $TestExe -Config $Configuration
     }
 }
 
@@ -97,6 +195,7 @@ if ($Test) {
     }
 }
 
+$InstalledAppExe = ""
 if (-not [string]::IsNullOrWhiteSpace($InstallPrefix)) {
     $ResolvedInstallPrefix = Resolve-WorkspacePath -InputPath $InstallPrefix
     Write-Host "==> Installing BeatrixLeslie IDE to $ResolvedInstallPrefix"
@@ -104,54 +203,27 @@ if (-not [string]::IsNullOrWhiteSpace($InstallPrefix)) {
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
     }
+
+    $InstalledAppExe = Join-Path $ResolvedInstallPrefix "bin\BeatrixLeslieIDE.exe"
+    if ($DeployQt) {
+        Invoke-WinDeployQtOnTarget -WinDeployQtExe $WinDeployQtExe -TargetExe $InstalledAppExe -Config $Configuration
+    }
 }
 
 if ($VerifyLoader) {
-    Write-Host "==> Verifying Windows runtime layout in $AppDir"
-    $CoreDll = Join-Path $AppDir "spell_core.dll"
-    $LicenseFile = Join-Path $AppDir "Resources\THIRD_PARTY_LICENSES.txt"
-    $LogoFile = Join-Path $AppDir "Resources\AppLogo.jpg"
-
-    if (-not (Test-Path -LiteralPath $CoreDll -PathType Leaf)) {
-        throw "Loader verification failed: missing '$CoreDll' alongside '$AppExe'."
+    Test-WindowsRuntimeLayout -TargetExe $AppExe -RequireQtDlls $DeployQt.IsPresent
+    if (-not [string]::IsNullOrWhiteSpace($InstalledAppExe)) {
+        Test-WindowsRuntimeLayout -TargetExe $InstalledAppExe -RequireQtDlls $DeployQt.IsPresent
     }
-    if (-not (Test-Path -LiteralPath $LicenseFile -PathType Leaf)) {
-        throw "Loader verification failed: missing '$LicenseFile'."
-    }
-    if (-not (Test-Path -LiteralPath $LogoFile -PathType Leaf)) {
-        throw "Loader verification failed: missing '$LogoFile'."
-    }
-
-    $DumpBin = Get-Command dumpbin -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($null -ne $DumpBin) {
-        $Imports = & $DumpBin.Source /DEPENDENTS $AppExe
-        if ($LASTEXITCODE -ne 0) {
-            exit $LASTEXITCODE
-        }
-        Write-Host ($Imports | Out-String)
-        if (-not (($Imports | Out-String) -match "spell_core\.dll")) {
-            throw "Loader verification failed: '$AppExe' PE import table does not reference spell_core.dll."
-        }
-    } else {
-        $ObjDump = Get-Command objdump -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($null -ne $ObjDump) {
-            $Imports = & $ObjDump.Source -p $AppExe | Select-String "DLL Name:"
-            Write-Host ($Imports | Out-String)
-            if (-not (($Imports | Out-String) -match "spell_core\.dll")) {
-                throw "Loader verification failed: '$AppExe' PE import table does not reference spell_core.dll."
-            }
-        }
-    }
-
-    Write-Host "==> Windows loader verification passed for $AppExe"
 }
 
 if ($Run) {
-    Write-Host "==> Launching $AppExe"
+    $LaunchExe = if (-not [string]::IsNullOrWhiteSpace($InstalledAppExe) -and $DeployQt) { $InstalledAppExe } else { $AppExe }
+    Write-Host "==> Launching $LaunchExe"
     if ($null -ne $RunArgs -and $RunArgs.Count -gt 0) {
-        & $AppExe @RunArgs
+        & $LaunchExe @RunArgs
     } else {
-        & $AppExe
+        & $LaunchExe
     }
     exit $LASTEXITCODE
 }

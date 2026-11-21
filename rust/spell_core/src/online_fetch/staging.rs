@@ -555,8 +555,8 @@ fn build_enriched_toc(
         existing_toc
     };
 
-    // If headings are absent on a large document, synthesize ~120-line reading windows so Slot 0
-    // always gets deterministic start_line..end_line coordinates for prefill subagents.
+    // If headings are absent on a large document, synthesize ~120-line reading windows so the
+    // main conversation always gets deterministic start_line..end_line coordinates for prefill subagents.
     if entries.is_empty() && markdown.len() > INLINE_ENVELOPE_MAX_BYTES {
         let window = 120usize;
         let mut start = 1usize;
@@ -1424,7 +1424,7 @@ mod tests {
         )
         .unwrap();
 
-        // Full 15KB+ document is saved on disk, while Slot 0 receives a compact ~600-950 token TOC envelope!
+        // Full 15KB+ document is saved on disk, while the main conversation receives a compact ~600-950 token TOC envelope!
         assert!(outcome.envelope_markdown.len() < 4_200);
         assert!(outcome
             .envelope_markdown

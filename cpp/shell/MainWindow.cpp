@@ -886,24 +886,6 @@ void MainWindow::Impl::wireSignals() {
                          }
                      });
 
-    QObject::connect(explorerPane, &ProjectExplorerPane::openOnlineResearchRequested, owner, [this]() {
-        owner->openSettings(SettingsPaneId::OnlineResearch);
-    });
-
-    QObject::connect(explorerPane, &ProjectExplorerPane::airGapNowRequested, owner, [this]() {
-        if (coreClient) {
-            coreClient->airGapNow();
-        }
-        pushStatusNotice(MainWindow::tr("Online Research air-gapped"), false);
-    });
-
-    QObject::connect(explorerPane, &ProjectExplorerPane::toggleStageWriteRequested, owner,
-                     [this](bool enabled) {
-                         if (coreClient) {
-                             coreClient->setStageWriteMode(enabled);
-                         }
-                     });
-
     QObject::connect(explorerPane, &ProjectExplorerPane::openProjectFileRequested, owner,
                      [this](const QString& rootPath) {
                          openFileDialog(rootPath);
@@ -2093,7 +2075,7 @@ MainWindow::MainWindow(const QString& dbPath, QWidget* parent)
             impl.coreClient->configureEndpoint(savedUrl, keyOpt, savedModel, savedSubModel);
             impl.coreClient->refreshEndpointStatus();
         }
-        impl.coreClient->setSlot2CriticEnabled(impl.settingsStore->slot2CriticEnabled());
+        impl.coreClient->setCriticEnabled(impl.settingsStore->criticEnabled());
     });
 }
 

@@ -34,6 +34,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 
@@ -1319,13 +1320,13 @@ SubagentsSettingsPane::SubagentsSettingsPane(SpellCoreClient* client,
         if (m_impl->syncingUi) {
             return;
         }
-        m_impl->lastSnapshot.slot2CriticEnabled = checked;
+        m_impl->lastSnapshot.criticEnabled = checked;
         if (m_impl->store) {
-            m_impl->store->setSlot2CriticEnabled(checked);
+            m_impl->store->setCriticEnabled(checked);
             m_impl->store->sync();
         }
         if (m_impl->client) {
-            m_impl->client->setSlot2CriticEnabled(checked);
+            m_impl->client->setCriticEnabled(checked);
         }
     });
 
@@ -1560,6 +1561,13 @@ SubagentsSettingsPane::SubagentsSettingsPane(SpellCoreClient* client,
                 m_impl->subagentModelCombo->setEditText(storeSub);
                 m_impl->syncingUi = false;
             }
+            const bool criticOn = m_impl->store->criticEnabled();
+            m_impl->syncingUi = true;
+            if (m_impl->criticCheckBox->isChecked() != criticOn) {
+                m_impl->criticCheckBox->setChecked(criticOn);
+            }
+            m_impl->updateCriticVisuals(criticOn);
+            m_impl->syncingUi = false;
             m_impl->populateModelDropdown(m_impl->cachedModels);
             m_impl->updateModelSummaryRows();
             m_impl->refreshPoolSlotTiles();
@@ -1576,7 +1584,7 @@ SubagentsSettingsPane::SubagentsSettingsPane(SpellCoreClient* client,
     if (store) {
         m_impl->lastSyncedSubagentModelId = store->subagentModelId().trimmed();
         m_impl->subagentModelCombo->setEditText(m_impl->lastSyncedSubagentModelId);
-        const bool criticOn = store->slot2CriticEnabled();
+        const bool criticOn = store->criticEnabled();
         m_impl->criticCheckBox->setChecked(criticOn);
         m_impl->updateCriticVisuals(criticOn);
     } else {
@@ -1637,8 +1645,8 @@ void SubagentsSettingsPane::updateSnapshot(const WorkspaceSnapshot& snap) {
     }
     m_impl->protocolDescLabel->setText(protocolDescription(normProto));
 
-    // Sync Gatekeeper Critic LLM Review toggle (`slot2CriticEnabled`).
-    const bool criticEnabled = snap.slot2CriticEnabled;
+    // Sync Gatekeeper Critic LLM Review toggle (`criticEnabled`).
+    const bool criticEnabled = snap.criticEnabled;
     if (m_impl->criticCheckBox->isChecked() != criticEnabled) {
         m_impl->criticCheckBox->setChecked(criticEnabled);
     }

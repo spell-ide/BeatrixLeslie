@@ -31,7 +31,9 @@ use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
 
 use crate::tags::{format_tags_rubric_block, ConversationTag, TagRegistry};
-use crate::upstream_compat::DUPLICATE_FILE_REF_TAG;
+
+/// Tag emitted when an unchanged file is re-read within a turn.
+pub const DUPLICATE_FILE_REF_TAG: &str = "duplicate_file_ref";
 
 // ============================================================================
 // Constants (C5) & Hook 2 / Hook 3
@@ -401,9 +403,8 @@ pub fn enforce_path_guardrail(path: &Path) -> Result<(), ToolError> {
     Ok(())
 }
 
-/// Rejects any mutating filesystem operation targeting `.spell/research_cache` or
-/// `.beatrix/research_cache` staging files (including deleting/moving the parent directory when
-/// `research_cache` exists inside it).
+/// Rejects any mutating filesystem operation targeting `.spell/research_cache` staging files
+/// (including deleting/moving the parent directory when `research_cache` exists inside it).
 pub fn enforce_research_cache_write_guard(path: &Path) -> Result<(), ToolError> {
     if crate::online_fetch::is_research_cache_path(path) {
         return Err(ToolError::SecurityViolation(
@@ -413,7 +414,7 @@ pub fn enforce_research_cache_write_guard(path: &Path) -> Result<(), ToolError> 
     if path
         .file_name()
         .and_then(|s| s.to_str())
-        .map(|n| n.eq_ignore_ascii_case(".spell") || n.eq_ignore_ascii_case(".beatrix"))
+        .map(|n| n.eq_ignore_ascii_case(".spell"))
         .unwrap_or(false)
     {
         let has_cache_child = path.join("research_cache").exists()
@@ -3442,7 +3443,7 @@ pub struct NumberedSubagentContext {
 
 /// Reads and line-numbers `1..=32` workspace-relative files (and optionally directories) inside
 /// `WorkspaceSandbox` (`resolve_workspace_path`) for subagent prefill (`8K..=128K` tokens)
-/// without inserting raw file dumps into `slot0` history.
+/// without inserting raw file dumps into main conversation history.
 ///
 /// Returns `(files_read_count, estimated_prefill_tokens, formatted_numbered_bundle)`.
 pub fn collect_numbered_subagent_context(
@@ -3463,7 +3464,7 @@ pub fn collect_numbered_subagent_context(
 }
 
 /// Variant of [`collect_numbered_subagent_context`] accepting optional `extra_roots` (such as
-/// staged `.beatrix/research_cache` fallback directories on read-only workspaces).
+/// staged `.spell/research_cache` fallback directories on read-only workspaces).
 ///
 /// Tolerates partial missing paths when at least one valid readable file resolves (appending a
 /// `<missing_paths>` block at the end of the returned bundle) while keeping security, sandbox,
@@ -5662,9 +5663,9 @@ mod tests {
     }
 
     #[test]
-    fn test_gate04_canonical_acl_symlinks_and_protected_globs() {
+    fn test_canonical_acl_symlinks_and_protected_globs() {
         let base_dir =
-            std::env::temp_dir().join(format!("spell_gate04_test_{}", std::process::id()));
+            std::env::temp_dir().join(format!("spell_acl_symlinks_test_{}", std::process::id()));
         let _ = fs::remove_dir_all(&base_dir);
         let ws = base_dir.join("ws");
         fs::create_dir_all(ws.join("subdir")).unwrap();
@@ -5751,9 +5752,9 @@ mod tests {
     }
 
     #[test]
-    fn test_gate05_folder_access_tiers_and_read_only_root() {
+    fn test_folder_access_tiers_and_read_only_root() {
         let base_dir =
-            std::env::temp_dir().join(format!("spell_gate05_test_{}", std::process::id()));
+            std::env::temp_dir().join(format!("spell_access_tiers_test_{}", std::process::id()));
         let _ = fs::remove_dir_all(&base_dir);
         let ws = base_dir.join("ws");
         let ro_root = base_dir.join("ro_sibling");
@@ -5796,7 +5797,7 @@ mod tests {
     }
 
     #[test]
-    fn test_gate06_terminal_allow_scoped_timeout_and_env_scrub() {
+    fn test_terminal_allow_scoped_timeout_and_env_scrub() {
         let _env_guard = SANDBOX_ENV_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -5809,7 +5810,7 @@ mod tests {
         assert!(validate_allow_scoped_command("cargo test && echo pwned", allowed_re).is_err());
         assert!(validate_allow_scoped_command("python3 -c 'print(1)'", allowed_re).is_err());
 
-        let ws = std::env::temp_dir().join(format!("spell_gate06_test_{}", std::process::id()));
+        let ws = std::env::temp_dir().join(format!("spell_terminal_scrub_test_{}", std::process::id()));
         let _ = fs::remove_dir_all(&ws);
         fs::create_dir_all(&ws).unwrap();
 
@@ -5868,9 +5869,9 @@ mod tests {
     }
 
     #[test]
-    fn test_gate05_stage_write_shadow_overlay_commit_and_rollback() {
+    fn test_stage_write_shadow_overlay_commit_and_rollback() {
         let ws = std::env::temp_dir()
-            .join(format!("spell_gate05_stage_write_{}", std::process::id()));
+            .join(format!("spell_stage_write_overlay_{}", std::process::id()));
         let _ = fs::remove_dir_all(&ws);
         let src_dir = ws.join("src");
         fs::create_dir_all(&src_dir).unwrap();
@@ -5936,7 +5937,7 @@ mod tests {
     }
 
     #[test]
-    fn test_gate09_primitives_snapshots_symbols_and_diagnostics() {
+    fn test_primitives_snapshots_symbols_and_diagnostics() {
         // 1. Verify `FileSnapshot::slice_lines` O(1) line slicing and SHA-256
         let sample = "line_alpha\nline_beta\nline_gamma\nline_delta\n";
         let snap = FileSnapshot::from_content(PathBuf::from("sample.txt"), sample.to_string());
@@ -6023,7 +6024,7 @@ def parse_metric(raw: str) -> int:
     }
 
     #[test]
-    fn test_gate14_lexical_symbol_outliner_raw_strings_lifetimes_and_docstrings() {
+    fn test_lexical_symbol_outliner_raw_strings_lifetimes_and_docstrings() {
         let rust_src = "\
 impl<'a> LexerScanner<'a> {
     pub fn scan_token<'b>(&'a self, input: &'b str) -> &'b str {
@@ -6280,20 +6281,20 @@ def next_fn():
     #[test]
     fn test_research_cache_read_allowed_and_write_blocked() {
         let ws = std::env::temp_dir().join(format!(
-            "beatrix_research_cache_guard_{}",
+            "spell_research_cache_guard_{}",
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&ws);
-        let cache_dir = ws.join(".beatrix/research_cache/papers/arxiv_2501_12345");
+        let cache_dir = ws.join(".spell/research_cache/papers/arxiv_2501_12345");
         fs::create_dir_all(&cache_dir).unwrap();
         let cached_doc = cache_dir.join("document.md");
         fs::write(&cached_doc, "# Theorem 1\nNEEDLE_EQUATION_42\n").unwrap();
 
-        // 1. Read tools succeed seamlessly on <workspace>/.beatrix/research_cache/...
+        // 1. Read tools succeed seamlessly on <workspace>/.spell/research_cache/...
         let mut pin_cache = TurnPinCache::new();
         let read_out = execute_read_file_tool(
             &ws,
-            ".beatrix/research_cache/papers/arxiv_2501_12345/document.md",
+            ".spell/research_cache/papers/arxiv_2501_12345/document.md",
             None,
             None,
             &mut pin_cache,
@@ -6313,7 +6314,7 @@ def next_fn():
 
         let (sub_count, _, sub_bundle) = collect_numbered_subagent_context(
             &ws,
-            &[".beatrix/research_cache/papers/arxiv_2501_12345/document.md".to_string()],
+            &[".spell/research_cache/papers/arxiv_2501_12345/document.md".to_string()],
             None,
             64_000,
             true,
@@ -6340,7 +6341,7 @@ def next_fn():
             execute_edit_file_tool(
                 &ws,
                 &EditFileToolInput {
-                    path: ".beatrix/research_cache/papers/arxiv_2501_12345/document.md".to_string(),
+                    path: ".spell/research_cache/papers/arxiv_2501_12345/document.md".to_string(),
                     display_description: None,
                     edits: vec![FileEditOperation {
                         old_text: "Theorem 1".to_string(),
@@ -6362,7 +6363,7 @@ def next_fn():
         assert_eq!(
             store.stage_write(
                 &cached_doc,
-                ".beatrix/research_cache/papers/arxiv_2501_12345/document.md",
+                ".spell/research_cache/papers/arxiv_2501_12345/document.md",
                 "tamper".to_string(),
             ),
             Err(expected_err)
@@ -6408,7 +6409,7 @@ def next_fn():
             "Cargo.toml",
             "README.md",
             "docs/architecture.md",
-            ".beatrix/research_cache/doc.md",
+            ".spell/research_cache/doc.md",
         ] {
             assert!(
                 !is_web_taint_sensitive_workspace_file(benign),
@@ -6444,7 +6445,7 @@ def next_fn():
         assert!(params["properties"]["target_files"].get("minItems").is_none());
 
         let tmp = std::env::temp_dir().join(format!(
-            "beatrix_delegate_sysprompt_test_{}",
+            "spell_delegate_sysprompt_test_{}",
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&tmp);
@@ -6458,7 +6459,7 @@ def next_fn():
     #[test]
     fn test_enforce_research_cache_write_guard_mixed_case_apfs() {
         let ws = std::env::temp_dir().join(format!(
-            "beatrix_research_cache_mixed_case_test_{}",
+            "spell_research_cache_mixed_case_test_{}",
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&ws);
@@ -6468,15 +6469,12 @@ def next_fn():
             "Cannot modify read-only research_cache staging files".to_string(),
         );
 
-        // Caught even before `.Spell/Research_Cache` or `.Beatrix/Research_Cache` exists on disk!
+        // Caught even before `.Spell/Research_Cache` exists on disk!
         for mixed in [
             PathBuf::from(".Spell/Research_Cache/foo.md"),
             PathBuf::from("./.SPELL/research_cache/papers/doc.md"),
-            PathBuf::from(".Beatrix/Research_Cache/foo.md"),
-            PathBuf::from("./.BEATRIX/research_cache/papers/doc.md"),
             ws.join(".Spell/Research_Cache/foo.md"),
-            ws.join(".Beatrix/Research_Cache/foo.md"),
-            ws.join(".beatrix/RESEARCH_CACHE/nested/bar.md"),
+            ws.join(".spell/RESEARCH_CACHE/nested/bar.md"),
         ] {
             assert!(
                 crate::online_fetch::is_research_cache_path(&mixed),
@@ -6489,14 +6487,14 @@ def next_fn():
             );
         }
 
-        let abs_mixed = ws.join(".Beatrix/Research_Cache/foo.md");
+        let abs_mixed = ws.join(".Spell/Research_Cache/foo.md");
         assert_eq!(
             write_file(&abs_mixed, "tamper", true),
             Err(expected_err.clone())
         );
         let mut store = WorkspaceSnapshotStore::new();
         assert_eq!(
-            store.stage_write(&abs_mixed, ".Beatrix/Research_Cache/foo.md", "tamper".into()),
+            store.stage_write(&abs_mixed, ".Spell/Research_Cache/foo.md", "tamper".into()),
             Err(expected_err)
         );
         assert!(!abs_mixed.exists());
@@ -6510,7 +6508,7 @@ def next_fn():
         use std::os::unix::fs::symlink;
 
         let ws = std::env::temp_dir().join(format!(
-            "beatrix_commit_staged_symlink_test_{}",
+            "spell_commit_staged_symlink_test_{}",
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&ws);
@@ -6563,7 +6561,7 @@ def next_fn():
     #[test]
     fn test_collect_numbered_subagent_context_partial_missing_all_missing_and_security_hard_fail() {
         let ws = std::env::temp_dir().join(format!(
-            "beatrix_subagent_ctx_partial_missing_{}",
+            "spell_subagent_ctx_partial_missing_{}",
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&ws);

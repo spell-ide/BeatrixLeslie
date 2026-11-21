@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <initializer_list>
 #include <optional>
+#include <utility>
 
 namespace spell {
 
@@ -936,7 +937,7 @@ struct TelemetrySnapshot {
     quint64 totalCompletionTokens = 0;
     quint64 totalCachedTokens = 0;
     int compactionEpoch = 0;
-    bool slot2CriticEnabled = false;
+    bool criticEnabled = false;
 
     bool operator==(const TelemetrySnapshot&) const = default;
 
@@ -973,7 +974,7 @@ struct TelemetrySnapshot {
         t.totalCachedTokens = detail::getUInt64(
             obj, {"total_cached_tokens", "totalCachedTokens", "cached_tokens", "cachedTokens"}, 0);
         t.compactionEpoch = detail::getInt(obj, {"compaction_epoch", "compactionEpoch"}, 0);
-        t.slot2CriticEnabled = detail::getBool(obj, {"slot2_critic_enabled", "slot2CriticEnabled"}, false);
+        t.criticEnabled = detail::getBool(obj, {"critic_enabled", "criticEnabled"}, false);
         return t;
     }
 
@@ -992,7 +993,7 @@ struct TelemetrySnapshot {
             {QStringLiteral("total_completion_tokens"), static_cast<qint64>(totalCompletionTokens)},
             {QStringLiteral("total_cached_tokens"), static_cast<qint64>(totalCachedTokens)},
             {QStringLiteral("compaction_epoch"), compactionEpoch},
-            {QStringLiteral("slot2_critic_enabled"), slot2CriticEnabled},
+            {QStringLiteral("critic_enabled"), criticEnabled},
         };
     }
 };
@@ -1023,7 +1024,7 @@ struct WorkspaceSnapshot {
     QString subagentProtocol = QStringLiteral("auto"); // "auto" | "native" | "json"
     bool autonomousLoopEnabled = true;
     int maxAgentSteps = 12;
-    bool slot2CriticEnabled = false;
+    bool criticEnabled = false;
     bool isAgentBusy = false;
     QJsonObject raw;
 
@@ -1299,8 +1300,8 @@ struct WorkspaceSnapshot {
         }
         snap.endpointConfigured = pickOptionalBool({"endpoint_configured", "endpointConfigured"})
                                       .value_or(snap.telemetry.endpointConfigured || !snap.endpointBaseUrl.isEmpty());
-        snap.slot2CriticEnabled = pickOptionalBool({"slot2_critic_enabled", "slot2CriticEnabled"})
-                                      .value_or(snap.telemetry.slot2CriticEnabled);
+        snap.criticEnabled = pickOptionalBool({"critic_enabled", "criticEnabled"})
+                                 .value_or(snap.telemetry.criticEnabled);
 
         // Synchronize top-level endpoint fields back into telemetry
         if (snap.telemetry.modelId.isEmpty() && !snap.modelId.isEmpty()) {
@@ -1312,8 +1313,8 @@ struct WorkspaceSnapshot {
         if (snap.endpointConfigured) {
             snap.telemetry.endpointConfigured = true;
         }
-        if (snap.slot2CriticEnabled) {
-            snap.telemetry.slot2CriticEnabled = true;
+        if (snap.criticEnabled) {
+            snap.telemetry.criticEnabled = true;
         }
 
         // Execution & loop flags
@@ -1404,7 +1405,7 @@ struct WorkspaceSnapshot {
             {QStringLiteral("subagent_protocol"), subagentProtocol},
             {QStringLiteral("autonomous_loop_enabled"), autonomousLoopEnabled},
             {QStringLiteral("max_agent_steps"), maxAgentSteps},
-            {QStringLiteral("slot2_critic_enabled"), slot2CriticEnabled},
+            {QStringLiteral("critic_enabled"), criticEnabled},
             {QStringLiteral("is_agent_busy"), isAgentBusy},
         };
     }

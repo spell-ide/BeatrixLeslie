@@ -14,6 +14,7 @@
 #include <QFrame>
 #include <QGuiApplication>
 #include <QHBoxLayout>
+#include <QMetaObject>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPaintEvent>

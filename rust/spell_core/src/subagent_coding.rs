@@ -34,7 +34,6 @@ pub const MAX_DELEGATION_UNDO_RECORDS: usize = 64;
 
 /// HTML comment prefix carrying machine-readable [`DelegationResultMeta`] JSON for UI cards.
 pub const DELEGATION_META_COMMENT_PREFIX: &str = "<!-- spell_delegation_meta: ";
-const LEGACY_DELEGATION_META_COMMENT_PREFIX: &str = "<!-- beatrix_delegation_meta: ";
 
 /// Exact 9-tool allowlist exposed inside `delegate_coding_subagent`
 /// (shared identically across Option A native tool calls and Option B JSON actions).
@@ -1761,6 +1760,17 @@ fn write_undo_file_nofollow(path: &Path, content: &[u8]) -> Result<(), String> {
         use std::os::unix::fs::OpenOptionsExt;
         opts.custom_flags(libc::O_NOFOLLOW);
     }
+    #[cfg(not(unix))]
+    {
+        if let Ok(meta) = fs::symlink_metadata(path) {
+            if meta.file_type().is_symlink() {
+                return Err(format!(
+                    "SECURITY_VIOLATION: Symlink detected on restore of '{}'",
+                    path.display()
+                ));
+            }
+        }
+    }
     let mut file = opts.open(path).map_err(|e| {
         #[cfg(unix)]
         if e.raw_os_error() == Some(libc::ELOOP) {
@@ -2093,17 +2103,10 @@ pub fn format_delegation_result_output(
 }
 
 /// Extracts and deserializes [`DelegationResultMeta`] from a formatted `<subagent_coding_result>`
-/// tool output containing `<!-- spell_delegation_meta: {...} -->` (or legacy metadata comments).
+/// tool output containing `<!-- spell_delegation_meta: {...} -->`.
 pub fn parse_delegation_result_meta(output: &str) -> Option<DelegationResultMeta> {
-    let (start, prefix_len) = output
-        .rfind(DELEGATION_META_COMMENT_PREFIX)
-        .map(|idx| (idx, DELEGATION_META_COMMENT_PREFIX.len()))
-        .or_else(|| {
-            output
-                .rfind(LEGACY_DELEGATION_META_COMMENT_PREFIX)
-                .map(|idx| (idx, LEGACY_DELEGATION_META_COMMENT_PREFIX.len()))
-        })?;
-    let json_start = start + prefix_len;
+    let start = output.rfind(DELEGATION_META_COMMENT_PREFIX)?;
+    let json_start = start + DELEGATION_META_COMMENT_PREFIX.len();
     let tail = &output[json_start..];
     let end_rel = tail.find("-->")?;
     let json_slice = tail[..end_rel].trim();
@@ -2605,7 +2608,7 @@ mod tests {
     #[test]
     fn test_delegation_overlay_search_undo_and_result_meta_formatting() {
         let ws = std::env::temp_dir().join(format!(
-            "beatrix_subagent_coding_overlay_test_{}",
+            "spell_subagent_coding_overlay_test_{}",
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&ws);
@@ -2779,11 +2782,11 @@ mod tests {
         assert!(formatted.contains("<!-- spell_delegation_meta: "));
         let parsed_meta = parse_delegation_result_meta(&formatted).expect("parse meta round-trip");
         assert_eq!(parsed_meta, meta);
-        let legacy_formatted = formatted.replace(
+        let invalid_prefix = formatted.replace(
             "<!-- spell_delegation_meta: ",
-            "<!-- beatrix_delegation_meta: ",
+            "<!-- unknown_delegation_meta: ",
         );
-        assert_eq!(parse_delegation_result_meta(&legacy_formatted), Some(meta));
+        assert_eq!(parse_delegation_result_meta(&invalid_prefix), None);
 
         // Prompt builders sanity check
         assert!(build_option_a_handoff_directive(12).contains("Option A"));
@@ -2885,7 +2888,7 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let ws = std::env::temp_dir().join(format!(
-            "beatrix_subagent_undo_symlink_guard_{}",
+            "spell_subagent_undo_symlink_guard_{}",
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&ws);
@@ -2968,7 +2971,7 @@ mod tests {
     #[test]
     fn test_grep_with_overlay_skips_dotenv_and_protected_secret_files() {
         let ws = std::env::temp_dir().join(format!(
-            "beatrix_subagent_grep_protected_globs_{}",
+            "spell_subagent_grep_protected_globs_{}",
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&ws);

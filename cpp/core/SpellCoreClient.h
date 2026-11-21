@@ -82,8 +82,8 @@ public:
     /** Dispatches `refresh_engine_status`. */
     void refreshEndpointStatus();
 
-    /** Dispatches `set_slot2_critic_enabled`. */
-    void setSlot2CriticEnabled(bool enabled);
+    /** Dispatches `set_critic_enabled`. */
+    void setCriticEnabled(bool enabled);
 
     // -------------------------------------------------------------------------
     // Projects & threads

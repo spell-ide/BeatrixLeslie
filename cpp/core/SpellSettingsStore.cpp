@@ -42,7 +42,7 @@ constexpr QLatin1StringView kCredentialsService("com.spell.SpellIDE.credentials"
 constexpr QLatin1StringView kKeyEndpointBaseUrl("spell.endpoint.baseURL");
 constexpr QLatin1StringView kKeyModelId("spell.endpoint.modelId");
 constexpr QLatin1StringView kKeySubagentModelId("spell.endpoint.subagentModelId");
-constexpr QLatin1StringView kKeySlot2CriticEnabled("spell.endpoint.slot2CriticEnabled");
+constexpr QLatin1StringView kKeyCriticEnabled("spell.endpoint.criticEnabled");
 
 constexpr QLatin1StringView kKeyLeftPaneWidth("spell.layout.leftPaneWidth");
 constexpr QLatin1StringView kKeyRightPaneWidth("spell.layout.rightPaneWidth");
@@ -439,18 +439,18 @@ void SpellSettingsStore::setEndpointConfig(const QString& baseUrl,
     }
 }
 
-bool SpellSettingsStore::slot2CriticEnabled() const {
+bool SpellSettingsStore::criticEnabled() const {
     QMutexLocker locker(&m_impl->settingsMutex);
-    return m_impl->settings.value(kKeySlot2CriticEnabled, false).toBool();
+    return m_impl->settings.value(kKeyCriticEnabled, false).toBool();
 }
 
-void SpellSettingsStore::setSlot2CriticEnabled(bool enabled) {
+void SpellSettingsStore::setCriticEnabled(bool enabled) {
     bool changed = false;
     {
         QMutexLocker locker(&m_impl->settingsMutex);
-        const bool previous = m_impl->settings.value(kKeySlot2CriticEnabled, false).toBool();
+        const bool previous = m_impl->settings.value(kKeyCriticEnabled, false).toBool();
         if (previous != enabled) {
-            m_impl->settings.setValue(kKeySlot2CriticEnabled, enabled);
+            m_impl->settings.setValue(kKeyCriticEnabled, enabled);
             changed = true;
         }
     }
@@ -1080,8 +1080,8 @@ QString SpellSettingsStore::exportDiagnosticsBundle(const WorkspaceSnapshot& sna
                                                   : (!effectiveSubagentModelId.isEmpty()
                                                          ? effectiveSubagentModelId
                                                          : effectiveModelId)},
-        {QStringLiteral("slot2_critic_enabled"),
-         snap.endpointConfigured ? snap.slot2CriticEnabled : slot2CriticEnabled()},
+        {QStringLiteral("critic_enabled"),
+         snap.endpointConfigured ? snap.criticEnabled : criticEnabled()},
         {QStringLiteral("latency_ms"), snap.telemetry.endpointLatencyMs},
         {QStringLiteral("available_models_count"), static_cast<int>(snap.availableModels.size())},
         {QStringLiteral("has_api_key"), hasEndpointApiKey()},
@@ -1119,7 +1119,7 @@ QString SpellSettingsStore::exportDiagnosticsBundle(const WorkspaceSnapshot& sna
          static_cast<qint64>(snap.telemetry.totalCompletionTokens)},
         {QStringLiteral("total_cached_tokens"), static_cast<qint64>(snap.telemetry.totalCachedTokens)},
         {QStringLiteral("compaction_epoch"), snap.telemetry.compactionEpoch},
-        {QStringLiteral("slot2_critic_enabled"), snap.telemetry.slot2CriticEnabled},
+        {QStringLiteral("critic_enabled"), snap.telemetry.criticEnabled},
     };
 
     const QJsonObject workspaceObj{
@@ -1135,7 +1135,7 @@ QString SpellSettingsStore::exportDiagnosticsBundle(const WorkspaceSnapshot& sna
         {QStringLiteral("subagent_protocol"), snap.subagentProtocol},
         {QStringLiteral("autonomous_loop_enabled"), snap.autonomousLoopEnabled},
         {QStringLiteral("max_agent_steps"), snap.maxAgentSteps},
-        {QStringLiteral("slot2_critic_enabled"), snap.slot2CriticEnabled},
+        {QStringLiteral("critic_enabled"), snap.criticEnabled},
         {QStringLiteral("is_agent_busy"), snap.isAgentBusy},
         {QStringLiteral("online_research_mode"), snap.onlineResearch.mode},
         {QStringLiteral("online_research_search_provider"), snap.onlineResearch.searchProvider},
@@ -1147,7 +1147,7 @@ QString SpellSettingsStore::exportDiagnosticsBundle(const WorkspaceSnapshot& sna
     };
 
     const QJsonObject preferencesObj{
-        {QStringLiteral("slot2_critic_enabled"), slot2CriticEnabled()},
+        {QStringLiteral("critic_enabled"), criticEnabled()},
         {QStringLiteral("left_pane_width"), leftPaneWidth()},
         {QStringLiteral("right_pane_width"), rightPaneWidth()},
         {QStringLiteral("left_pane_collapsed"), leftPaneCollapsed()},

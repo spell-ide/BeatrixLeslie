@@ -842,12 +842,12 @@ void SpellCoreClient::refreshEndpointStatus() {
     m_impl->dispatchInternal(cmd, opts);
 }
 
-void SpellCoreClient::setSlot2CriticEnabled(bool enabled) {
+void SpellCoreClient::setCriticEnabled(bool enabled) {
     QJsonObject cmd;
-    cmd.insert(QStringLiteral("cmd"), QStringLiteral("set_slot2_critic_enabled"));
+    cmd.insert(QStringLiteral("cmd"), QStringLiteral("set_critic_enabled"));
     cmd.insert(QStringLiteral("enabled"), enabled);
-    cmd.insert(QStringLiteral("slot2_critic_enabled"), enabled);
-    cmd.insert(QStringLiteral("slot2CriticEnabled"), enabled);
+    cmd.insert(QStringLiteral("critic_enabled"), enabled);
+    cmd.insert(QStringLiteral("criticEnabled"), enabled);
 
     DispatchOptions opts;
     opts.emitErrorSignal = true;

@@ -1,3 +1,24 @@
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0A00
+#elif _WIN32_WINNT < 0x0A00
+#undef _WIN32_WINNT
+#define _WIN32_WINNT 0x0A00
+#endif
+#ifndef NTDDI_VERSION
+#define NTDDI_VERSION 0x0A000006
+#elif NTDDI_VERSION < 0x0A000006
+#undef NTDDI_VERSION
+#define NTDDI_VERSION 0x0A000006
+#endif
+#endif
+
 #include "SpellPtyProcess.h"
 
 #include <QCoreApplication>
@@ -12,26 +33,17 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #ifdef _WIN32
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#ifndef _WIN32_WINNT
-#define _WIN32_WINNT 0x0A00
-#elif _WIN32_WINNT < 0x0A00
-#undef _WIN32_WINNT
-#define _WIN32_WINNT 0x0A00
-#endif
 #include <windows.h>
+#include <consoleapi.h>
 #else
 #if defined(__APPLE__)
 #include <util.h>

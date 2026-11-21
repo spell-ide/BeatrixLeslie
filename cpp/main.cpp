@@ -5,6 +5,7 @@
 #include "shell/MainWindow.h"
 #include "theme/SpellIcons.h"
 #include "theme/SpellTheme.h"
+#include "widgets/SpellSplitHandle.h"
 
 #include <QApplication>
 #include <QCommandLineOption>
@@ -15,22 +16,31 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QGuiApplication>
+#include <QMetaObject>
 #include <QMetaType>
 #include <QMutex>
 #include <QMutexLocker>
+#include <QPixmap>
 #include <QString>
 #include <QStringList>
+#include <QTemporaryDir>
 #include <QTimer>
 
 #include <algorithm>
 #include <csignal>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <exception>
+#include <memory>
 
 #if defined(__APPLE__) || defined(__linux__)
+#if __has_include(<execinfo.h>)
 #include <execinfo.h>
+#define SPELL_HAS_EXECINFO 1
+#endif
 #include <fcntl.h>
+#include <sys/types.h>
 #include <unistd.h>
 #endif
 
@@ -68,14 +78,18 @@ void crashSignalHandler(int sig) {
     writeStrFd(STDERR_FILENO, "\n[SPELL CRASH] Fatal signal: ");
     writeStrFd(STDERR_FILENO, name);
     writeStrFd(STDERR_FILENO, "\n");
+#if defined(SPELL_HAS_EXECINFO)
     void* frames[64];
     const int n = ::backtrace(frames, 64);
     ::backtrace_symbols_fd(frames, n, STDERR_FILENO);
+#endif
     if (gDiagLogFd >= 0) {
         writeStrFd(gDiagLogFd, "\n[SPELL CRASH] Fatal signal: ");
         writeStrFd(gDiagLogFd, name);
         writeStrFd(gDiagLogFd, "\n");
+#if defined(SPELL_HAS_EXECINFO)
         ::backtrace_symbols_fd(frames, n, gDiagLogFd);
+#endif
     }
     std::signal(sig, SIG_DFL);
     std::raise(sig);
@@ -236,6 +250,10 @@ int main(int argc, char* argv[]) {
         QStringLiteral("appearance"),
         QStringLiteral("Select UI appearance on launch ('dark' or 'white')."),
         QStringLiteral("mode"));
+    const QCommandLineOption exportScreenshotOption(
+        QStringLiteral("export-screenshot"),
+        QStringLiteral("Render a reproducible workspace screenshot to <path> and exit."),
+        QStringLiteral("path"));
 
     parser.addOption(dbOption);
     parser.addOption(settingsPaneOption);
@@ -244,6 +262,7 @@ int main(int argc, char* argv[]) {
     parser.addOption(openFileOption);
     parser.addOption(addProjectOption);
     parser.addOption(appearanceOption);
+    parser.addOption(exportScreenshotOption);
     parser.addPositionalArgument(
         QStringLiteral("paths"),
         QStringLiteral("Optional files or project directories to open."),
@@ -279,7 +298,16 @@ int main(int argc, char* argv[]) {
     app.setWindowIcon(spell::icons::appWindowIcon());
     spell::ThemeManager::instance().applyToApplication(&app);
 
-    const QString dbPath = parser.isSet(dbOption) ? parser.value(dbOption) : QString();
+    const QString exportScreenshotPath = parser.isSet(exportScreenshotOption)
+                                             ? parser.value(exportScreenshotOption).trimmed()
+                                             : QString();
+    const bool shouldExportScreenshot = !exportScreenshotPath.isEmpty();
+
+    const QString dbPath = parser.isSet(dbOption)
+                               ? parser.value(dbOption)
+                               : (shouldExportScreenshot ? QStringLiteral(":memory:") : QString());
+    QTemporaryDir screenshotSeedDir;
+
     spell::MainWindow window(dbPath);
     if (auto* client = window.coreClient()) {
         QObject::connect(client, &spell::SpellCoreClient::errorOccurred, &window,
@@ -295,6 +323,17 @@ int main(int argc, char* argv[]) {
                              }
                          });
     }
+
+    if (shouldExportScreenshot) {
+        if (window.isLeftPaneCollapsed()) {
+            window.toggleLeftPane();
+        }
+        if (window.isRightPaneCollapsed()) {
+            window.toggleRightPane();
+        }
+        window.resize(1440, 900);
+    }
+
     qInfo().noquote() << "[STARTUP] BeatrixLeslie IDE window ready (db:"
                       << (dbPath.isEmpty() ? QStringLiteral("default") : dbPath) << ")";
     window.show();
@@ -308,16 +347,25 @@ int main(int argc, char* argv[]) {
     const QStringList positionalPaths = parser.positionalArguments();
 
     if (shouldOpenSettingsPane || shouldOpenSettings || shouldOpenTerminalWindow ||
-        !filesToOpen.isEmpty() || !projectsToAdd.isEmpty() || !positionalPaths.isEmpty()) {
-        QTimer::singleShot(0, &window, [&window,
+        shouldExportScreenshot || !filesToOpen.isEmpty() || !projectsToAdd.isEmpty() ||
+        !positionalPaths.isEmpty()) {
+        QTimer::singleShot(0, &window, [&app,
+                                        &window,
+                                        &screenshotSeedDir,
                                         shouldOpenSettingsPane,
                                         settingsPaneName,
                                         shouldOpenSettings,
                                         shouldOpenTerminalWindow,
+                                        shouldExportScreenshot,
+                                        exportScreenshotPath,
                                         filesToOpen,
                                         projectsToAdd,
                                         positionalPaths]() {
-            auto addProjectDir = [&window](const QString& rawDir) {
+            bool addedAnyProject = false;
+            bool hasSpellCoreProject = false;
+            bool openedAnyFile = false;
+
+            auto addProjectDir = [&window, &addedAnyProject, &hasSpellCoreProject](const QString& rawDir) {
                 const QFileInfo fi(rawDir);
                 if (!fi.exists() || !fi.isDir() || !window.coreClient()) {
                     return;
@@ -327,14 +375,19 @@ int main(int argc, char* argv[]) {
                 if (name.isEmpty()) {
                     name = cleanPath;
                 }
+                if (name == QLatin1StringView("spell_core")) {
+                    hasSpellCoreProject = true;
+                }
+                addedAnyProject = true;
                 window.coreClient()->createProject(name, cleanPath, false);
             };
 
-            auto openSourceFile = [&window](const QString& rawFile) {
+            auto openSourceFile = [&window, &openedAnyFile](const QString& rawFile) {
                 const QFileInfo fi(rawFile);
                 if (!fi.exists() || !fi.isFile() || !window.editorPane()) {
                     return;
                 }
+                openedAnyFile = true;
                 window.editorPane()->openFile(QDir::cleanPath(fi.absoluteFilePath()), -1, false);
             };
 
@@ -361,6 +414,146 @@ int main(int argc, char* argv[]) {
                 window.openSettings(spell::settingsPaneFromName(settingsPaneName));
             } else if (shouldOpenSettings) {
                 window.openSettings(spell::SettingsPaneId::General);
+            }
+
+            if (shouldExportScreenshot) {
+                if (auto* sp = window.mainSplitter()) {
+                    sp->setSizes({280, 720, 440});
+                }
+
+                // Seed a realistic Rust file & `spell_core` project when none were passed on CLI.
+                QString seedProjectDir;
+                const QFileInfo repoSpellCoreDir(QStringLiteral("rust/spell_core"));
+                if (repoSpellCoreDir.exists() && repoSpellCoreDir.isDir()) {
+                    seedProjectDir = QDir::cleanPath(repoSpellCoreDir.absoluteFilePath());
+                } else if (screenshotSeedDir.isValid()) {
+                    seedProjectDir = QDir::cleanPath(screenshotSeedDir.filePath(QStringLiteral("spell_core")));
+                    QDir().mkpath(QDir(seedProjectDir).filePath(QStringLiteral("src")));
+                }
+
+                if (!openedAnyFile && window.editorPane() && screenshotSeedDir.isValid()) {
+                    const QString sampleRsPath = QDir::cleanPath(
+                        screenshotSeedDir.filePath(QStringLiteral("spell_core/src/lib.rs")));
+                    QDir().mkpath(QFileInfo(sampleRsPath).absolutePath());
+                    QFile sampleFile(sampleRsPath);
+                    if (sampleFile.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
+                        sampleFile.write(
+                            "// BeatrixLeslie IDE -- Standalone Endpoint-Agnostic Core Engine\n"
+                            "use std::path::{Path, PathBuf};\n"
+                            "use std::sync::Arc;\n\n"
+                            "#[derive(Debug, Clone, PartialEq, Eq)]\n"
+                            "pub struct EndpointConfig {\n"
+                            "    pub base_url: String,\n"
+                            "    pub model_id: String,\n"
+                            "    pub subagent_model_id: Option<String>,\n"
+                            "    pub critic_enabled: bool,\n"
+                            "}\n\n"
+                            "impl Default for EndpointConfig {\n"
+                            "    fn default() -> Self {\n"
+                            "        Self {\n"
+                            "            base_url: String::new(),\n"
+                            "            model_id: String::new(),\n"
+                            "            subagent_model_id: None,\n"
+                            "            critic_enabled: false,\n"
+                            "        }\n"
+                            "    }\n"
+                            "}\n\n"
+                            "pub struct WorkspaceSession {\n"
+                            "    db_path: PathBuf,\n"
+                            "    endpoint: EndpointConfig,\n"
+                            "    max_agent_steps: usize,\n"
+                            "}\n\n"
+                            "impl WorkspaceSession {\n"
+                            "    pub fn open(db_path: impl AsRef<Path>) -> Result<Arc<Self>, String> {\n"
+                            "        let resolved = db_path.as_ref().to_path_buf();\n"
+                            "        Ok(Arc::new(Self {\n"
+                            "            db_path: resolved,\n"
+                            "            endpoint: EndpointConfig::default(),\n"
+                            "            max_agent_steps: 12,\n"
+                            "        }))\n"
+                            "    }\n"
+                            "}\n");
+                        sampleFile.close();
+                    }
+                    window.editorPane()->openFile(sampleRsPath, 1, false);
+                }
+
+                struct ExportCaptureState {
+                    bool threadRequested = false;
+                    bool captureScheduled = false;
+                    QMetaObject::Connection snapConn;
+                };
+                auto state = std::make_shared<ExportCaptureState>();
+
+                auto scheduleCaptureAfterSettle = [&app, &window, exportScreenshotPath, state]() {
+                    if (state->captureScheduled) {
+                        return;
+                    }
+                    state->captureScheduled = true;
+                    if (state->snapConn) {
+                        QObject::disconnect(state->snapConn);
+                    }
+                    QTimer::singleShot(250, &window, [&app, &window, exportScreenshotPath]() {
+                        QWidget* target = &window;
+                        if (window.settingsDialog() && window.settingsDialog()->isVisible()) {
+                            target = window.settingsDialog();
+                        }
+                        const QPixmap pixmap = target->grab();
+                        const QFileInfo outInfo(exportScreenshotPath);
+                        QDir().mkpath(outInfo.absolutePath());
+                        if (!pixmap.save(outInfo.absoluteFilePath())) {
+                            qCritical().noquote() << "[SCREENSHOT ERROR] Failed to save screenshot to"
+                                                  << outInfo.absoluteFilePath();
+                            app.exit(1);
+                            return;
+                        }
+                        qInfo().noquote() << "[SCREENSHOT] Saved screenshot to"
+                                          << outInfo.absoluteFilePath();
+                        app.quit();
+                    });
+                };
+
+                if (auto* client = window.coreClient()) {
+                    state->snapConn = QObject::connect(
+                        client,
+                        &spell::SpellCoreClient::snapshotUpdated,
+                        &window,
+                        [client, state, scheduleCaptureAfterSettle](const spell::WorkspaceSnapshot& snap) {
+                            if (!state->threadRequested && !snap.projects.isEmpty()) {
+                                QString targetProjectId = snap.selectedProjectId;
+                                for (const auto& proj : snap.projects) {
+                                    if (proj.name == QLatin1StringView("spell_core")) {
+                                        targetProjectId = proj.id;
+                                        break;
+                                    }
+                                }
+                                if (targetProjectId.isEmpty()) {
+                                    targetProjectId = snap.projects.first().id;
+                                }
+                                state->threadRequested = true;
+                                client->createThread(
+                                    targetProjectId,
+                                    QStringLiteral("Architecture & Tooling"));
+                                return;
+                            }
+                            if (state->threadRequested && !snap.threads.isEmpty()) {
+                                scheduleCaptureAfterSettle();
+                            }
+                        });
+
+                    if (!hasSpellCoreProject && !seedProjectDir.isEmpty()) {
+                        client->createProject(QStringLiteral("spell_core"), seedProjectDir, false);
+                    } else if (addedAnyProject) {
+                        client->refreshSnapshot();
+                    } else {
+                        scheduleCaptureAfterSettle();
+                    }
+
+                    // Safety fallback so --export-screenshot never hangs if snapshot delivery is delayed.
+                    QTimer::singleShot(1500, &window, scheduleCaptureAfterSettle);
+                } else {
+                    scheduleCaptureAfterSettle();
+                }
             }
         });
     }

@@ -41,6 +41,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <functional>
 #include <memory>
 #include <optional>

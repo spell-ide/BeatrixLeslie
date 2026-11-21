@@ -131,7 +131,7 @@ private:
  * no file tree panel):
  * - **Top (`SpellInfoSubpanel`)**: the sole notification & status surface in the IDE
  *   (34px left-aligned `"BEATRIXLESLIE IDE"` header, compact key-value rows for `Server`,
- *   `Model`, `Network`, `Message`, `Mode`, and conditional `Tags` / `Timers` / `Terminal`,
+ *   `Model`, `Message`, and conditional `Tags` / `Timers` / `Terminal`,
  *   plus the 6-row newest-first `SpellStatusTicker`).
  * - **`SpellHairline`** (1px horizontal divider).
  * - **Middle (`ProjectsSubpanel`)**: `QScrollArea` containing expandable Project
@@ -182,9 +182,6 @@ signals:
     void settingsRequested(int initialPaneIndex = 0);
     void terminalPopOutRequested(const QString& workingDir, const QString& label);
     void conversationLinkedFolderChanged(const QString& threadId, const QString& folderPath);
-    void openOnlineResearchRequested();
-    void airGapNowRequested();
-    void toggleStageWriteRequested(bool enabled);
     void openProjectFileRequested(const QString& rootPath);
 
 private:

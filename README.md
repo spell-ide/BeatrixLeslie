@@ -23,7 +23,7 @@ Work in the integrated Message Terminal. When something breaks, type:
 #spell why did this fail?
 ```
 
-The terminal closes. The working directory and recent output are attached. The agent picks it up from there. No copy. No paste. No context lost.
+The working directory and recent output are attached. The agent picks it up from there. No copy. No paste. No context lost.
 
 ---
 

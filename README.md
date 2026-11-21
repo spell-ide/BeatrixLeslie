@@ -40,6 +40,11 @@ It ships with **zero bundled model weights** and **zero proprietary local server
 
 ## Prerequisites & Building from Source
 
+```bash
+git clone https://github.com/spell-ide/BeatrixLeslie.git
+cd BeatrixLeslie
+```
+
 `SPELL_BUILD_RUST` is enabled (`ON`) by default in `CMakeLists.txt`, so a clean `git clone` followed by CMake configure + build automatically compiles `rust/spell_core` (`cargo build --release --lib`), links `BeatrixLeslieIDE` and `SpellQtTests`, stages runtime resources, and configures OS-portable dynamic loader paths.
 
 ### 1. macOS (Apple Silicon & Intel)

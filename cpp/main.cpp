@@ -205,7 +205,10 @@ int main(int argc, char* argv[]) {
     QCommandLineParser parser;
     parser.setApplicationDescription(QStringLiteral("BeatrixLeslie IDE — Standalone Endpoint-Agnostic AI Coding IDE"));
     parser.addHelpOption();
-    parser.addVersionOption();
+    const QCommandLineOption versionOption(
+        {QStringLiteral("v"), QStringLiteral("version")},
+        QStringLiteral("Displays version information."));
+    parser.addOption(versionOption);
 
     const QCommandLineOption dbOption(
         QStringLiteral("db"),
@@ -257,6 +260,12 @@ int main(int argc, char* argv[]) {
             filteredArgs.end());
     }
     parser.process(filteredArgs);
+
+    if (parser.isSet(versionOption)) {
+        std::fprintf(stdout, "BeatrixLeslie IDE %s\n",
+                     QCoreApplication::applicationVersion().toUtf8().constData());
+        return 0;
+    }
 
     if (parser.isSet(appearanceOption)) {
         const QString mode = parser.value(appearanceOption).trimmed().toLower();

@@ -15,6 +15,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Security
 
 - **Documented `unsafe`.** `spell_core` denies `unsafe_op_in_unsafe_fn` and `clippy::undocumented_unsafe_blocks`. Every unsafe operation in the C ABI is an explicit block with a `SAFETY:` justification. Enforced in CI.
+- **`url` 2.5.9.** Fixes `RUSTSEC-2026-0592` (stack overflow in `Url::origin()` on nested `blob:` URLs).
 
 ## [1.0.0] - 2026-11-22
 

@@ -1,4 +1,4 @@
-# BeatrixLeslie IDE - Product Documentation
+# BEATRIXLESLIE + IDE - Product Documentation
 
 ![BeatrixLeslie IDE](docs/screenshot.png)
 

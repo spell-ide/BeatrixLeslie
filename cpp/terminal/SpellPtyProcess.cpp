@@ -1505,7 +1505,7 @@ QProcessEnvironment SpellPtyProcess::buildSanitizedEnvironment(const QProcessEnv
     const QString appVersion = QCoreApplication::applicationVersion().trimmed();
     sanitized.insert(
         QStringLiteral("TERM_PROGRAM_VERSION"),
-        appVersion.isEmpty() ? QStringLiteral("1.0.0") : appVersion);
+        appVersion.isEmpty() ? QStringLiteral(SPELL_APP_VERSION) : appVersion);
 
 #ifndef _WIN32
     if (!sanitized.contains(QStringLiteral("LANG"))

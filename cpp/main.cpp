@@ -209,7 +209,7 @@ int main(int argc, char* argv[]) {
     QCoreApplication::setOrganizationName(QStringLiteral("Spell"));
     QCoreApplication::setOrganizationDomain(QStringLiteral("com.spell.SpellIDE"));
     QCoreApplication::setApplicationName(QStringLiteral("SpellIDE"));
-    QCoreApplication::setApplicationVersion(QStringLiteral("1.0.0"));
+    QCoreApplication::setApplicationVersion(QStringLiteral(SPELL_APP_VERSION));
     QGuiApplication::setApplicationDisplayName(QStringLiteral("BeatrixLeslie IDE"));
     QGuiApplication::setDesktopFileName(QStringLiteral("com.spell.BeatrixLeslieIDE"));
 

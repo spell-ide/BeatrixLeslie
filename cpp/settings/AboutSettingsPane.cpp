@@ -38,7 +38,7 @@ namespace spell {
 namespace {
 
 constexpr auto kBundleIdentifier = "com.spell.BeatrixLeslieIDE";
-constexpr auto kFallbackVersion = "1.0.0";
+constexpr auto kFallbackVersion = SPELL_APP_VERSION;
 
 QString resolvedAppVersion() {
     const QString appVersion = QCoreApplication::applicationVersion().trimmed();

@@ -1066,7 +1066,7 @@ QString SpellSettingsStore::exportDiagnosticsBundle(const WorkspaceSnapshot& sna
     const bool effectiveConfigured = snap.endpointConfigured || !effectiveBaseUrl.isEmpty();
 
     const QString appVersion = QCoreApplication::applicationVersion().trimmed().isEmpty()
-                                   ? QStringLiteral("1.0.0")
+                                   ? QStringLiteral(SPELL_APP_VERSION)
                                    : QCoreApplication::applicationVersion().trimmed();
 
     const QJsonObject endpointObj{

@@ -11,6 +11,9 @@
 //! - [`storage`]: SQLite3 relational & KV persistence (`SpellStorage`) preserving exact `WireMessage` history and local wall-clock timers.
 //! - [`agent_loop`]: `SpellCoreSession` multi-turn agent loop, local context reset, local timers, local subagent slots, and JSON FFI router.
 
+#![deny(unsafe_op_in_unsafe_fn)]
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 pub mod agent_loop;
 pub mod contract;
 pub mod locator;
@@ -149,7 +152,7 @@ pub unsafe extern "C" fn spell_session_new(db_path: *const c_char) -> *mut Spell
             None
         } else {
             // SAFETY: Caller guarantees non-null `db_path` points to a valid NUL-terminated C string.
-            CStr::from_ptr(db_path)
+            unsafe { CStr::from_ptr(db_path) }
                 .to_str()
                 .ok()
                 .map(str::trim)
@@ -176,7 +179,7 @@ pub unsafe extern "C" fn spell_session_free(ptr: *mut SpellCoreSession) {
     if !ptr.is_null() {
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             // SAFETY: Caller guarantees non-null `ptr` was allocated via `Box::into_raw` in `spell_session_new`.
-            let _ = Box::from_raw(ptr);
+            let _ = unsafe { Box::from_raw(ptr) };
         }));
     }
 }
@@ -198,12 +201,12 @@ pub unsafe extern "C" fn spell_session_dispatch_json(
             .into_raw();
     }
     // SAFETY: Caller guarantees `ptr` is a valid, exclusively borrowed `SpellCoreSession` pointer.
-    let session = &mut *ptr;
+    let session = unsafe { &mut *ptr };
     let cmd_str = if cmd_json.is_null() {
         "{\"cmd\":\"get_snapshot\"}"
     } else {
         // SAFETY: Caller guarantees non-null `cmd_json` points to a valid NUL-terminated C string.
-        CStr::from_ptr(cmd_json)
+        unsafe { CStr::from_ptr(cmd_json) }
             .to_str()
             .unwrap_or("{\"cmd\":\"get_snapshot\"}")
     };
@@ -242,7 +245,7 @@ pub unsafe extern "C" fn spell_session_dispatch_json(
 pub unsafe extern "C" fn spell_free_string(ptr: *mut c_char) {
     if !ptr.is_null() {
         // SAFETY: Caller guarantees non-null `ptr` was allocated via `CString::into_raw` in this crate.
-        let _ = CString::from_raw(ptr);
+        let _ = unsafe { CString::from_raw(ptr) };
     }
 }
 
@@ -295,7 +298,7 @@ pub unsafe extern "C" fn spell_terminal_publish(state_json: *const c_char) -> bo
         return false;
     }
     // SAFETY: Caller guarantees non-null `state_json` points to a valid NUL-terminated C string.
-    let Ok(text) = CStr::from_ptr(state_json).to_str() else {
+    let Ok(text) = unsafe { CStr::from_ptr(state_json) }.to_str() else {
         return false;
     };
     let Ok(val) = serde_json::from_str::<serde_json::Value>(text) else {
@@ -337,7 +340,7 @@ pub unsafe extern "C" fn spell_read_file_unrestricted(
         return CString::from(c"IO_ERROR: null path_ptr").into_raw();
     }
     // SAFETY: Caller guarantees non-null `path_ptr` points to a valid NUL-terminated C string.
-    let path_str = match CStr::from_ptr(path_ptr).to_str() {
+    let path_str = match unsafe { CStr::from_ptr(path_ptr) }.to_str() {
         Ok(s) => s,
         Err(_) => return CString::from(c"IO_ERROR: invalid UTF-8 path").into_raw(),
     };

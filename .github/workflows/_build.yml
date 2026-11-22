@@ -57,6 +57,27 @@ jobs:
           command: check
           command-arguments: advisories bans licenses sources
 
+      - name: Verify version consistency (CMake, Cargo, CHANGELOG, tag)
+        run: |
+          CMAKE_VER="$(sed -nE 's/^project\(BeatrixLeslieIDE VERSION ([0-9.]+).*/\1/p' CMakeLists.txt)"
+          CARGO_VER="$(sed -nE 's/^version = "([0-9.]+)"/\1/p' rust/spell_core/Cargo.toml | head -1)"
+          CHANGELOG_VER="$(sed -nE 's/^## \[([0-9.]+)\].*/\1/p' CHANGELOG.md | head -1)"
+          echo "CMake=${CMAKE_VER} Cargo=${CARGO_VER} CHANGELOG=${CHANGELOG_VER}"
+          [[ -n "${CMAKE_VER}" && "${CMAKE_VER}" == "${CARGO_VER}" && "${CMAKE_VER}" == "${CHANGELOG_VER}" ]]
+          REF="${{ inputs.checkout_ref || github.ref }}"
+          if [[ "${REF}" == refs/tags/v* || "${REF}" == v* ]]; then
+            [[ "${REF##*/}" == "v${CMAKE_VER}" ]] || { echo "Tag ${REF##*/} != v${CMAKE_VER}" >&2; exit 1; }
+          fi
+
+      - name: Install clippy system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libsecret-1-dev pkg-config
+
+      - name: Enforce documented unsafe (clippy)
+        working-directory: rust/spell_core
+        run: |
+          rustup component add clippy
+          cargo clippy --all-targets -- -A clippy::all -D clippy::undocumented_unsafe_blocks -D unsafe_op_in_unsafe_fn
+
   macos:
     name: macOS (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}

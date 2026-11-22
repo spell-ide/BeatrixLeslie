@@ -43,11 +43,15 @@ Prebuilt archives and `SHA256SUMS.txt` are published on [GitHub Releases](https:
 | Linux x86_64 (Portable archive) | `BeatrixLeslieIDE-linux-x86_64.tar.gz` |
 | Windows 10/11 x86_64 | `BeatrixLeslieIDE-windows-x86_64.zip` |
 
-First launch for unsigned builds:
+Verify. Then run.
 
-- **macOS:** `xattr -dr com.apple.quarantine /Applications/BeatrixLeslieIDE.app`
+```bash
+shasum -a 256 -c SHA256SUMS.txt --ignore-missing
+```
+
+- **macOS:** Signed and notarized. Unzip. Drag to Applications. Open.
 - **Linux:** `chmod +x BeatrixLeslieIDE-linux-x86_64.AppImage && ./BeatrixLeslieIDE-linux-x86_64.AppImage`
-- **Windows:** SmartScreen → **More info** → **Run anyway**
+- **Windows:** Unsigned. SmartScreen → **More info** → **Run anyway**.
 
 ### Requirements
 
@@ -69,10 +73,18 @@ cd BeatrixLeslie
 ./scripts/build_and_run.sh --test --verify-loader --run
 ```
 
-macOS self-contained `.app` (optional Developer ID signing / notarization via `--codesign-identity <id> --notarize-profile <profile>`):
+macOS self-contained `.app`:
 
 ```bash
 ./scripts/build_and_run.sh --install dist --deploy-qt --test --verify-loader
+```
+
+Sign and notarize your own build. Developer ID plus an App Store Connect API key. No passwords.
+
+```bash
+./scripts/build_and_run.sh --install dist --deploy-qt \
+  --codesign-identity "Developer ID Application: <Name> (<TEAMID>)" \
+  --notary-key AuthKey_<KEYID>.p8 --notary-key-id <KEYID> --notary-issuer <ISSUER-UUID>
 ```
 
 Linux self-contained bundle and AppImage:

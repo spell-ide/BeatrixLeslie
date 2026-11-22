@@ -5,6 +5,8 @@
 - **Stack.** C++20, Qt 6, QScintilla2 (`cpp/`), and Rust (`rust/spell_core`) bridged over C ABI.
 - **Wire protocol.** OpenAI `/v1` compatible HTTP/SSE endpoints only. No vendor-specific SDKs.
 - **Boundaries.** No Electron. No webviews. No telemetry, analytics, or unprompted network calls.
+- **Unsafe.** Every `unsafe` block carries a `// SAFETY:` comment. No exceptions. CI enforces it.
+- **Releases.** Bump `CMakeLists.txt`, `rust/spell_core/Cargo.toml`, and `CHANGELOG.md` together. Tag `vX.Y.Z`. Never re-tag a published release.
 - **Secrets.** Credentials stay in the OS keychain (`SPELL_EPHEMERAL_KEYRING=1` in tests). Never write API keys to disk or logs.
 
 ## Verification
@@ -16,6 +18,7 @@ Every pull request must pass before review:
 ```bash
 python3 scripts/generate_third_party_licenses.py --check
 cargo deny --manifest-path rust/spell_core/Cargo.toml check advisories bans licenses sources
+(cd rust/spell_core && cargo clippy --all-targets -- -A clippy::all -D clippy::undocumented_unsafe_blocks -D unsafe_op_in_unsafe_fn)
 ./scripts/build_and_run.sh --strict-warnings --install dist --deploy-qt --test --verify-loader
 ```
 

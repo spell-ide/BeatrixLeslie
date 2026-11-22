@@ -1118,8 +1118,22 @@ struct SpellTerminalEmulator::Impl {
     // SGR handling (16-color, 256-color, 24-bit RGB, semicolon & colon forms)
     // -------------------------------------------------------------------------
 
-    static uint8_t clampByte(std::optional<int> v) noexcept {
-        return static_cast<uint8_t>(std::clamp(v.value_or(0), 0, 255));
+    static uint8_t clampIntByte(int raw) noexcept {
+        if (raw <= 0) {
+            return 0;
+        }
+        if (raw >= 255) {
+            return 255;
+        }
+        return static_cast<uint8_t>(raw);
+    }
+
+    static uint8_t clampByte(const std::optional<int>& v) noexcept {
+        return clampIntByte(v.has_value() ? *v : 0);
+    }
+
+    static int firstGroupIntOrZero(const ParamGroup& g) noexcept {
+        return (!g.empty() && g[0].has_value()) ? *g[0] : 0;
     }
 
     static std::pair<std::optional<TermColor>, size_t>
@@ -1127,7 +1141,7 @@ struct SpellTerminalEmulator::Impl {
         const ParamGroup& group = groups[idx];
         // Colon form: e.g. 38:5:N, 38:2:R:G:B, 38:2:CS:R:G:B
         if (group.size() > 1) {
-            const int kind = group[1].value_or(0);
+            const int kind = group[1].has_value() ? *group[1] : 0;
             if (kind == 5 && group.size() >= 3) {
                 return {TermColor::indexed(clampByte(group[2])), 0};
             }
@@ -1145,18 +1159,15 @@ struct SpellTerminalEmulator::Impl {
         if (idx + 1 >= groups.size()) {
             return {std::nullopt, 0};
         }
-        const int kind = (!groups[idx + 1].empty() && groups[idx + 1][0].has_value())
-            ? *groups[idx + 1][0]
-            : 0;
+        const int kind = firstGroupIntOrZero(groups[idx + 1]);
         if (kind == 5 && idx + 2 < groups.size()) {
-            const std::optional<int> n = groups[idx + 2].empty() ? std::nullopt : groups[idx + 2][0];
-            return {TermColor::indexed(clampByte(n)), 2};
+            return {TermColor::indexed(clampIntByte(firstGroupIntOrZero(groups[idx + 2]))), 2};
         }
         if (kind == 2 && idx + 4 < groups.size()) {
-            const std::optional<int> r = groups[idx + 2].empty() ? std::nullopt : groups[idx + 2][0];
-            const std::optional<int> g = groups[idx + 3].empty() ? std::nullopt : groups[idx + 3][0];
-            const std::optional<int> b = groups[idx + 4].empty() ? std::nullopt : groups[idx + 4][0];
-            return {TermColor::rgb(clampByte(r), clampByte(g), clampByte(b)), 4};
+            return {TermColor::rgb(clampIntByte(firstGroupIntOrZero(groups[idx + 2])),
+                                   clampIntByte(firstGroupIntOrZero(groups[idx + 3])),
+                                   clampIntByte(firstGroupIntOrZero(groups[idx + 4]))),
+                    4};
         }
         return {std::nullopt, 1};
     }

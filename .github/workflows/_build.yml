@@ -20,11 +20,11 @@ on:
         required: false
       MACOS_CODESIGN_IDENTITY:
         required: false
-      MACOS_NOTARY_APPLE_ID:
+      MACOS_NOTARY_KEY_P8:
         required: false
-      MACOS_NOTARY_TEAM_ID:
+      MACOS_NOTARY_KEY_ID:
         required: false
-      MACOS_NOTARY_PASSWORD:
+      MACOS_NOTARY_ISSUER_ID:
         required: false
       WINDOWS_PFX_BASE64:
         required: false
@@ -90,14 +90,16 @@ jobs:
           shared-key: macos-${{ matrix.arch }}
           cache-on-failure: true
 
-      - name: Configure Apple Developer ID signing and notarization (optional)
+      - name: Configure Apple Developer ID signing and App Store Connect API notarization (optional)
+        id: codesign
         env:
           MACOS_CERT_P12_BASE64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
           MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
           MACOS_CODESIGN_IDENTITY: ${{ secrets.MACOS_CODESIGN_IDENTITY }}
-          MACOS_NOTARY_APPLE_ID: ${{ secrets.MACOS_NOTARY_APPLE_ID }}
-          MACOS_NOTARY_TEAM_ID: ${{ secrets.MACOS_NOTARY_TEAM_ID }}
-          MACOS_NOTARY_PASSWORD: ${{ secrets.MACOS_NOTARY_PASSWORD }}
+          MACOS_NOTARY_KEY_P8: ${{ secrets.MACOS_NOTARY_KEY_P8 }}
+          MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          MACOS_NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
+          PACKAGE_ARTIFACTS: ${{ inputs.package_artifacts }}
         run: |
           if [[ -z "${MACOS_CERT_P12_BASE64}" ]]; then
             echo "==> MACOS_CERT_P12_BASE64 not set; using ad-hoc bundle signing."
@@ -120,6 +122,9 @@ jobs:
           done < <(security list-keychains -d user)
           security list-keychains -d user -s "${KEYCHAIN_PATH}" "${EXISTING_KEYCHAINS[@]}"
 
+          G2_CERT_PATH="${RUNNER_TEMP}/DeveloperIDG2CA.cer"
+          curl -fsSL https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer -o "${G2_CERT_PATH}"
+          security import "${G2_CERT_PATH}" -t cert -k "${KEYCHAIN_PATH}"
           security import "${CERT_PATH}" -P "${MACOS_CERT_PASSWORD}" -A -t cert -f pkcs12 -k "${KEYCHAIN_PATH}"
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "${KEYCHAIN_PASS}" "${KEYCHAIN_PATH}"
 
@@ -133,17 +138,30 @@ jobs:
           fi
           echo "SPELL_CODESIGN_IDENTITY=${IDENTITY}" >> "${GITHUB_ENV}"
 
-          if [[ -n "${MACOS_NOTARY_APPLE_ID}" && -n "${MACOS_NOTARY_TEAM_ID}" && -n "${MACOS_NOTARY_PASSWORD}" ]]; then
-            xcrun notarytool store-credentials "spell-notary" \
-              --apple-id "${MACOS_NOTARY_APPLE_ID}" \
-              --team-id "${MACOS_NOTARY_TEAM_ID}" \
-              --password "${MACOS_NOTARY_PASSWORD}" \
-              --keychain "${KEYCHAIN_PATH}"
-            echo "SPELL_NOTARIZE_PROFILE=spell-notary" >> "${GITHUB_ENV}"
+          if [[ "${PACKAGE_ARTIFACTS}" == "true" && -n "${MACOS_NOTARY_KEY_P8}" && -n "${MACOS_NOTARY_KEY_ID}" ]]; then
+            NOTARY_KEY_PATH="${RUNNER_TEMP}/spell-notary.p8"
+            umask 077
+            if [[ "${MACOS_NOTARY_KEY_P8}" == *"-----BEGIN PRIVATE KEY-----"* ]]; then
+              printf '%s\n' "${MACOS_NOTARY_KEY_P8}" > "${NOTARY_KEY_PATH}"
+            else
+              printf '%s' "${MACOS_NOTARY_KEY_P8}" | base64 --decode > "${NOTARY_KEY_PATH}"
+            fi
+            echo "SPELL_NOTARY_KEY_PATH=${NOTARY_KEY_PATH}" >> "${GITHUB_ENV}"
+            echo "SPELL_NOTARY_KEY_ID=${MACOS_NOTARY_KEY_ID}" >> "${GITHUB_ENV}"
+            if [[ -n "${MACOS_NOTARY_ISSUER_ID}" ]]; then
+              echo "SPELL_NOTARY_ISSUER_ID=${MACOS_NOTARY_ISSUER_ID}" >> "${GITHUB_ENV}"
+            fi
+            echo "notarized=true" >> "${GITHUB_OUTPUT}"
           fi
 
       - name: Build, deploy Qt, test, and verify self-contained bundle
         run: ./scripts/build_and_run.sh --arch ${{ matrix.arch }} --strict-warnings --install dist --deploy-qt --test --verify-loader
+
+      - name: Verify Gatekeeper and stapled notarization
+        if: inputs.package_artifacts && steps.codesign.outputs.notarized == 'true'
+        run: |
+          xcrun stapler validate dist/BeatrixLeslieIDE.app
+          spctl --assess --type execute --verbose=4 dist/BeatrixLeslieIDE.app
 
       - name: Create macOS zip archive
         if: inputs.package_artifacts
@@ -164,7 +182,7 @@ jobs:
           if [[ -f "${RUNNER_TEMP}/spell-codesign.keychain-db" ]]; then
             security delete-keychain "${RUNNER_TEMP}/spell-codesign.keychain-db" || true
           fi
-          rm -f "${RUNNER_TEMP}/spell-codesign.p12"
+          rm -f "${RUNNER_TEMP}/spell-codesign.p12" "${RUNNER_TEMP}/spell-notary.p8" "${RUNNER_TEMP}/DeveloperIDG2CA.cer"
 
   linux:
     name: Linux (Ubuntu 24.04 x86_64)

@@ -15,6 +15,9 @@ INSTALL_PREFIX=""
 APPIMAGE_OUTPUT=""
 CODESIGN_IDENTITY="${SPELL_CODESIGN_IDENTITY:--}"
 NOTARIZE_PROFILE="${SPELL_NOTARIZE_PROFILE:-}"
+NOTARY_KEY_PATH="${SPELL_NOTARY_KEY_PATH:-}"
+NOTARY_KEY_ID="${SPELL_NOTARY_KEY_ID:-}"
+NOTARY_ISSUER_ID="${SPELL_NOTARY_ISSUER_ID:-}"
 RUN_APP=0
 RUN_ARGS=()
 
@@ -37,6 +40,9 @@ Options:
   --package-appimage <path>    Package deployed Linux prefix into a self-contained x86_64 AppImage
   --codesign-identity <id>     macOS codesign identity (default: $SPELL_CODESIGN_IDENTITY or '-' ad-hoc)
   --notarize-profile <name>    macOS notarytool keychain profile (default: $SPELL_NOTARIZE_PROFILE)
+  --notary-key <path.p8>       App Store Connect API key .p8 path (default: $SPELL_NOTARY_KEY_PATH)
+  --notary-key-id <id>         App Store Connect API Key ID (default: $SPELL_NOTARY_KEY_ID)
+  --notary-issuer <uuid>       App Store Connect API Issuer ID (default: $SPELL_NOTARY_ISSUER_ID)
   --verify-loader              Verify dynamic library loader paths, RPATHs, and headless startup
   --install <prefix>           Install portable application layout into <prefix>
   --run                        Launch the built BeatrixLeslieIDE executable
@@ -130,6 +136,30 @@ while [[ $# -gt 0 ]]; do
                 exit 1
             fi
             NOTARIZE_PROFILE="$2"
+            shift 2
+            ;;
+        --notary-key)
+            if [[ $# -lt 2 ]]; then
+                echo "Error: --notary-key requires a .p8 file path argument." >&2
+                exit 1
+            fi
+            NOTARY_KEY_PATH="$2"
+            shift 2
+            ;;
+        --notary-key-id)
+            if [[ $# -lt 2 ]]; then
+                echo "Error: --notary-key-id requires a Key ID argument." >&2
+                exit 1
+            fi
+            NOTARY_KEY_ID="$2"
+            shift 2
+            ;;
+        --notary-issuer)
+            if [[ $# -lt 2 ]]; then
+                echo "Error: --notary-issuer requires an Issuer ID UUID argument." >&2
+                exit 1
+            fi
+            NOTARY_ISSUER_ID="$2"
             shift 2
             ;;
         --verify-loader)
@@ -384,8 +414,8 @@ deploy_macos_bundle() {
         exit 1
     fi
 
-    if [[ -n "${NOTARIZE_PROFILE}" && "${CODESIGN_IDENTITY}" == "-" ]]; then
-        echo "Error: --notarize-profile requires a Developer ID --codesign-identity (ad-hoc '-' cannot be notarized)." >&2
+    if [[ "${CODESIGN_IDENTITY}" == "-" && ( -n "${NOTARIZE_PROFILE}" || ( -n "${NOTARY_KEY_PATH}" && -n "${NOTARY_KEY_ID}" ) ) ]]; then
+        echo "Error: Apple notarization requires a Developer ID --codesign-identity (ad-hoc '-' cannot be notarized)." >&2
         exit 1
     fi
 
@@ -582,8 +612,24 @@ deploy_macos_bundle() {
 
     codesign --verify --deep --strict "${bundle_dir}"
 
-    # 5. Optional Apple notarization & stapling when NOTARIZE_PROFILE is configured.
-    if [[ -n "${NOTARIZE_PROFILE}" ]]; then
+    # 5. Optional Apple notarization & stapling via App Store Connect API Key or Keychain profile.
+    if [[ -n "${NOTARY_KEY_PATH}" && -n "${NOTARY_KEY_ID}" ]]; then
+        echo "==> Submitting ${bundle_dir} for Apple notarization (API Key ID: ${NOTARY_KEY_ID})"
+        local notarize_tmp
+        notarize_tmp="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/spell-notarize.XXXXXX")"
+        local notarize_zip="${notarize_tmp}/BeatrixLeslieIDE-notarize.zip"
+        ditto -c -k --sequesterRsrc --keepParent "${bundle_dir}" "${notarize_zip}"
+        local notary_args=(--key "${NOTARY_KEY_PATH}" --key-id "${NOTARY_KEY_ID}")
+        if [[ -n "${NOTARY_ISSUER_ID}" ]]; then
+            notary_args+=(--issuer "${NOTARY_ISSUER_ID}")
+        fi
+        xcrun notarytool submit "${notarize_zip}" "${notary_args[@]}" --wait
+        rm -rf "${notarize_tmp}"
+
+        echo "==> Stapling and validating notarization ticket on ${bundle_dir}"
+        xcrun stapler staple "${bundle_dir}"
+        xcrun stapler validate "${bundle_dir}"
+    elif [[ -n "${NOTARIZE_PROFILE}" ]]; then
         echo "==> Submitting ${bundle_dir} for Apple notarization (profile: ${NOTARIZE_PROFILE})"
         local notarize_tmp
         notarize_tmp="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/spell-notarize.XXXXXX")"

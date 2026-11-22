@@ -390,7 +390,7 @@ void SubagentsSettingsPane::Impl::populateModelDropdown(const QVector<ModelDescr
     if (QLineEdit* le = subagentModelCombo->lineEdit()) {
         cursorPos = le->cursorPosition();
         selStart = le->selectionStart();
-        selLength = le->selectedText().length();
+        selLength = static_cast<int>(le->selectedText().length());
     }
 
     const QSignalBlocker blocker(subagentModelCombo);

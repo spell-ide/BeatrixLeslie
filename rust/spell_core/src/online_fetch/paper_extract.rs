@@ -1845,20 +1845,23 @@ fn protect_inline_verb(input: &str, blocks: &mut Vec<String>) -> String {
             if j < bytes.len() && bytes[j] == b'*' {
                 j += 1;
             }
-            if j < bytes.len() && !bytes[j].is_ascii_alphabetic() && !bytes[j].is_ascii_whitespace()
-            {
-                let delim = bytes[j];
-                if let Some(rel_end) = bytes[j + 1..].iter().position(|&b| b == delim) {
-                    let content = &input[j + 1..j + 1 + rel_end];
-                    let ph = make_placeholder(blocks.len());
-                    blocks.push(format!("`{content}`"));
-                    out.push_str(&ph);
-                    i = j + 1 + rel_end + 1;
-                    continue;
+            if let Some(delim) = input[j..].chars().next() {
+                if !delim.is_alphabetic() && !delim.is_whitespace() && !delim.is_control() {
+                    let content_start = j + delim.len_utf8();
+                    if let Some(rel_end) = input[content_start..].find(delim) {
+                        let content = &input[content_start..content_start + rel_end];
+                        let ph = make_placeholder(blocks.len());
+                        blocks.push(format!("`{content}`"));
+                        out.push_str(&ph);
+                        i = content_start + rel_end + delim.len_utf8();
+                        continue;
+                    }
                 }
             }
         }
-        let ch = input[i..].chars().next().unwrap();
+        let Some(ch) = input[i..].chars().next() else {
+            break;
+        };
         out.push(ch);
         i += ch.len_utf8();
     }
@@ -4197,5 +4200,17 @@ Content B.
         )
         .expect_err("must halt immediately on challenge");
         assert!(matches!(err, OnlineFetchError::ChallengeOrRateLimited { status: 429, .. }));
+    }
+
+    #[test]
+    fn test_latex_inline_verb_unicode_delimiter_never_panics() {
+        let mut blocks = Vec::new();
+        let protected = protect_inline_verb(r"Inline \verb§x§ and unclosed \verb§tail", &mut blocks);
+        assert_eq!(blocks, vec!["`x`".to_string()]);
+        assert!(protected.contains("unclosed \\verb§tail"));
+
+        let tex = r"\documentclass{article}\begin{document}\section{Intro}Check \verb§x§ here.\end{document}";
+        let (markdown, _, _, _) = convert_latex_to_markdown(tex, &[]);
+        assert!(markdown.contains("`x`"));
     }
 }

@@ -10,7 +10,7 @@ namespace spell {
  * Settings -> About pane for BeatrixLeslie IDE.
  *
  * Displays BeatrixLeslie IDE branding (using the shipped logo/hat assets), version and
- * bundle identifier (`com.spell.SpellIDE`), portable runtime information, and
+ * bundle identifier (`com.spell.BeatrixLeslieIDE`), portable runtime information, and
  * an embedded viewer for third-party open-source licenses and notices
  * (`THIRD_PARTY_LICENSES.txt` / `THIRD_PARTY_NOTICES.md`).
  */

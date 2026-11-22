@@ -37,7 +37,7 @@ namespace spell {
 
 namespace {
 
-constexpr auto kBundleIdentifier = "com.spell.SpellIDE";
+constexpr auto kBundleIdentifier = "com.spell.BeatrixLeslieIDE";
 constexpr auto kFallbackVersion = "1.0.0";
 
 QString resolvedAppVersion() {

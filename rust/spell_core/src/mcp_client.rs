@@ -248,7 +248,7 @@ pub fn spell_mcp_tool_specs() -> Vec<McpToolSpec> {
         },
         McpToolSpec {
             name: "timer_set".to_string(),
-            description: "Schedules a background autonomous agent wakeup timer (Hook 2).".to_string(),
+            description: "Schedules a background autonomous agent wakeup timer.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -276,7 +276,7 @@ pub fn spell_mcp_tool_specs() -> Vec<McpToolSpec> {
         },
         McpToolSpec {
             name: "timer_list".to_string(),
-            description: "Lists all scheduled, active, and cancelled Hook 2 wakeup timers.".to_string(),
+            description: "Lists all scheduled, active, and cancelled wakeup timers.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {}
@@ -401,61 +401,9 @@ fn id_value_to_key(id: &Value) -> Option<String> {
     }
 }
 
-/// Creates a real OS pipe pair `(read_file, write_file)` on Unix.
-#[cfg(unix)]
-pub fn create_os_pipe() -> Result<(fs::File, fs::File), String> {
-    let mut fds = [0 as libc::c_int; 2];
-    let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
-    if rc != 0 {
-        return Err(format!(
-            "Failed to create OS pipe: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
-    unsafe {
-        use std::os::unix::io::FromRawFd;
-        let reader = fs::File::from_raw_fd(fds[0]);
-        let writer = fs::File::from_raw_fd(fds[1]);
-        Ok((reader, writer))
-    }
-}
-
-#[cfg(not(unix))]
-struct ShutdownOnDropTcpWriter(std::net::TcpStream);
-
-#[cfg(not(unix))]
-impl Write for ShutdownOnDropTcpWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.write(buf)
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.0.flush()
-    }
-}
-
-#[cfg(not(unix))]
-impl Drop for ShutdownOnDropTcpWriter {
-    fn drop(&mut self) {
-        let _ = self.0.shutdown(std::net::Shutdown::Write);
-    }
-}
-
-#[cfg(not(unix))]
-fn create_loopback_pipe() -> Result<(std::net::TcpStream, ShutdownOnDropTcpWriter), String> {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0")
-        .map_err(|e| format!("Failed to bind loopback pipe listener: {e}"))?;
-    let addr = listener
-        .local_addr()
-        .map_err(|e| format!("Failed to inspect loopback pipe address: {e}"))?;
-    let writer = std::net::TcpStream::connect(addr)
-        .map_err(|e| format!("Failed to connect loopback pipe writer: {e}"))?;
-    let _ = writer.set_nodelay(true);
-    let (reader, _) = listener
-        .accept()
-        .map_err(|e| format!("Failed to accept loopback pipe reader: {e}"))?;
-    let _ = reader.set_nodelay(true);
-    Ok((reader, ShutdownOnDropTcpWriter(writer)))
+/// Creates a real OS pipe pair `(reader, writer)` via safe `std::io::pipe()`.
+pub fn create_os_pipe() -> Result<(std::io::PipeReader, std::io::PipeWriter), String> {
+    std::io::pipe().map_err(|err| format!("Failed to create OS pipe: {err}"))
 }
 
 // ============================================================================
@@ -748,15 +696,8 @@ impl McpStdioClient {
 
     /// Connects an `McpStdioClient` to a given [`EmbeddedMcpResponder`] over an in-process stream pair.
     pub fn connect_embedded(responder: Arc<EmbeddedMcpResponder>) -> Result<Self, String> {
-        #[cfg(unix)]
         let (c2s_read, c2s_write) = create_os_pipe()?;
-        #[cfg(unix)]
         let (s2c_read, s2c_write) = create_os_pipe()?;
-
-        #[cfg(not(unix))]
-        let (c2s_read, c2s_write) = create_loopback_pipe()?;
-        #[cfg(not(unix))]
-        let (s2c_read, s2c_write) = create_loopback_pipe()?;
 
         let _server_handle = responder.clone().serve_streams(c2s_read, s2c_write);
         let mut client = Self::from_streams(s2c_read, c2s_write);
@@ -1019,6 +960,8 @@ impl Drop for McpStdioClient {
                 {
                     let pgid = child.id() as i32;
                     if pgid > 0 {
+                        // SAFETY: `child` was spawned in its own process group (`process_group(0)`),
+                        // so `-pgid` targets only that child's process group and `SIGKILL` is valid.
                         unsafe {
                             libc::kill(-pgid, libc::SIGKILL);
                         }
@@ -1038,7 +981,7 @@ impl Drop for McpStdioClient {
 // 3. EmbeddedMcpResponder (10-Tool `spell-full-file-mcp` Compatible Responder)
 // ============================================================================
 
-/// Record of a scheduled Hook 2 timer inside [`EmbeddedMcpResponder`].
+/// Record of a scheduled wakeup timer inside [`EmbeddedMcpResponder`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpTimerRecord {
     pub timer_id: String,
@@ -2087,6 +2030,7 @@ fn check_pid_alive(pid: i32) -> bool {
     if pid <= 0 {
         return false;
     }
+    // SAFETY: `kill(pid, 0)` with `pid > 0` sends no signal and performs only a kernel existence/permission check.
     let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
     if rc == 0 {
         return true;
@@ -2435,7 +2379,7 @@ mod tests {
     }
 
     #[test]
-    fn test_vuln05_mcp_path_confinement_protected_globs_and_http_probe_sanitization() {
+    fn test_mcp_path_confinement_protected_globs_and_http_probe_sanitization() {
         // 1. probe_local_http CRLF / whitespace / non-loopback rejection
         assert_eq!(
             probe_local_http("http://127.0.0.1:8080/health\r\nX-Injected: pwn").unwrap_err(),
@@ -2453,7 +2397,7 @@ mod tests {
 
         // 2. EmbeddedMcpResponder path confinement & protected globs
         let base_dir = std::env::temp_dir().join(format!(
-            "spell_mcp_vuln05_test_{}",
+            "spell_mcp_confinement_test_{}",
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&base_dir);
@@ -2571,7 +2515,7 @@ mod tests {
     }
 
     #[test]
-    fn test_catch1_mcp_fetch_html_production_ssrf_loopback_guard() {
+    fn test_mcp_fetch_html_production_ssrf_loopback_guard() {
         for forbidden in [
             "http://127.0.0.1:8000/v1/models",
             "https://127.0.0.1:8000/v1/chat/completions",

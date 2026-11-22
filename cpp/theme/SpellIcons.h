@@ -906,6 +906,8 @@ inline QString findResourceFile(const QString& filename) {
         if (!appDir.isEmpty()) {
             // macOS .app/Contents/MacOS -> ../Resources
             addDir(appDir + QStringLiteral("/../Resources"));
+            // Linux FHS / AppDir usr/bin -> ../share/BeatrixLeslieIDE/Resources
+            addDir(appDir + QStringLiteral("/../share/BeatrixLeslieIDE/Resources"));
             addDir(appDir + QStringLiteral("/Resources"));
             addDir(appDir);
 

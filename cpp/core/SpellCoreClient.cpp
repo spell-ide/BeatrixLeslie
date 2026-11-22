@@ -563,7 +563,7 @@ struct SpellCoreClient::Impl {
                 QMetaObject::invokeMethod(
                     target,
                     [target, st, responseObj, fallbackSnapshotObj, opts, trackBusy,
-                     cb = std::move(cb)]() mutable {
+                     uiCb = std::move(cb)]() mutable {
                         if (trackBusy) {
                             st->busyOperationsInFlight.fetch_sub(1, std::memory_order_acq_rel);
                         }
@@ -595,8 +595,8 @@ struct SpellCoreClient::Impl {
                             emit target->errorOccurred(err);
                         }
 
-                        if (cb) {
-                            cb(responseObj);
+                        if (uiCb) {
+                            uiCb(responseObj);
                         }
                     },
                     Qt::QueuedConnection);

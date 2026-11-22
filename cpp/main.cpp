@@ -136,7 +136,8 @@ void initDiagnosticLogging() {
                                  .arg(ts, QLatin1StringView(level), loc, msg);
         const QByteArray utf8 = line.toUtf8();
         QMutexLocker lock(&gLogMutex);
-        std::fwrite(utf8.constData(), 1, static_cast<size_t>(utf8.size()), stderr);
+        const std::size_t written = std::fwrite(utf8.constData(), 1, static_cast<std::size_t>(utf8.size()), stderr);
+        (void)written;
         std::fflush(stderr);
         if (gDiagLogFile.isOpen()) {
             gDiagLogFile.write(utf8);

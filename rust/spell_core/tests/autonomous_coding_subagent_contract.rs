@@ -1,4 +1,4 @@
-//! Wave 4-A: Exhaustive Offline HTTP/1.1 + SSE Integration Contract Suite for
+//! Exhaustive Offline HTTP/1.1 + SSE Integration Contract Suite for
 //! `delegate_coding_subagent` over real `HttpTransport` and ephemeral `LoopbackVerifyServer`
 //! (`127.0.0.1:0`).
 
@@ -27,8 +27,8 @@ use test_support::{
     FIXTURE_MAIN_MODEL_ID, FIXTURE_SUBAGENT_MODEL_ID,
 };
 
-static W4A_WORKSPACE_SEQ: AtomicU64 = AtomicU64::new(1);
-const W4A_BEARER_KEY: &str = "w4a-offline-contract-bearer-key";
+static WORKSPACE_SEQ: AtomicU64 = AtomicU64::new(1);
+const CONTRACT_BEARER_KEY: &str = "offline-contract-bearer-key";
 
 /// RAII temporary workspace directory that cleans up on drop without touching any real repo.
 struct TempWorkspace {
@@ -37,9 +37,9 @@ struct TempWorkspace {
 
 impl TempWorkspace {
     fn new(label: &str) -> Self {
-        let seq = W4A_WORKSPACE_SEQ.fetch_add(1, Ordering::SeqCst);
+        let seq = WORKSPACE_SEQ.fetch_add(1, Ordering::SeqCst);
         let pid = std::process::id();
-        let dir = std::env::temp_dir().join(format!("spell_w4a_{pid}_{seq}_{label}"));
+        let dir = std::env::temp_dir().join(format!("spell_contract_{pid}_{seq}_{label}"));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("src")).expect("create temp workspace src/");
         Self { root: dir }
@@ -81,7 +81,7 @@ fn boot_http_loopback_session(
     String,
 ) {
     let fixture = Arc::new(FixtureTransport::new());
-    let server = LoopbackVerifyServer::start(fixture.clone(), W4A_BEARER_KEY)
+    let server = LoopbackVerifyServer::start(fixture.clone(), CONTRACT_BEARER_KEY)
         .expect("start ephemeral LoopbackVerifyServer");
     assert_ne!(
         server.addr().port(),
@@ -110,7 +110,7 @@ fn boot_http_loopback_session(
 
     let _proj = session
         .add_project(
-            "W4AContractWorkspace",
+            "ContractWorkspace",
             ws.path().to_str().expect("utf8 workspace path"),
             false,
         )
@@ -159,12 +159,12 @@ fn delegate_calls_only(all: &[RecordedSubagentCall]) -> Vec<&RecordedSubagentCal
 }
 
 // ============================================================================
-// 1. Option A Streaming SSE Multi-Step Overlay Reads, Commit, Journal & Undo
+// 1. Native Tool-Call Streaming SSE Multi-Step Overlay Reads, Commit, Journal & Undo
 // ============================================================================
 
 #[test]
-fn test_e2e_option_a_streaming_sse_multistep_overlay_reads_commit_journal_and_undo() {
-    let ws = TempWorkspace::new("opt_a_multistep_undo");
+fn test_e2e_native_protocol_streaming_sse_multistep_overlay_reads_commit_journal_and_undo() {
+    let ws = TempWorkspace::new("native_multistep_undo");
     let orig_lib = concat!(
         "//! Core arithmetic library.\n",
         "pub fn compute_total(base: usize, factor: usize) -> usize {\n",
@@ -184,7 +184,7 @@ fn test_e2e_option_a_streaming_sse_multistep_overlay_reads_commit_journal_and_un
         "}\n",
     );
 
-    // Queue 9 Option A native tool-call steps (each split across 2 SSE delta.tool_calls chunks by LoopbackVerifyServer):
+    // Queue 9 native tool-call steps (each split across 2 SSE delta.tool_calls chunks by LoopbackVerifyServer):
     // 0: find_path
     fixture.push_subagent_tool_calls(vec![make_tc(
         "tc_0_find",
@@ -266,17 +266,20 @@ fn test_e2e_option_a_streaming_sse_multistep_overlay_reads_commit_journal_and_un
         .expect("execute_delegate_coding_subagent_direct");
     assert_eq!(status, "completed");
 
-    // Verify all 9 Option A subagent wire calls streamed SSE (`stream: true`, `tool_choice: "auto"`)
+    // Verify all 9 native tool-call subagent wire calls streamed SSE (`stream: true`, `tool_choice: "auto"`)
     let all_calls = fixture.recorded_subagent_calls();
     let del_calls = delegate_calls_only(&all_calls);
-    assert_eq!(del_calls.len(), 9, "Expected 9 Option A steps");
+    assert_eq!(del_calls.len(), 9, "Expected 9 native tool-call steps");
     for (idx, call) in del_calls.iter().enumerate() {
         assert_eq!(call.model, FIXTURE_SUBAGENT_MODEL_ID, "step {idx} model");
-        assert!(call.stream, "step {idx} must use stream=true in Option A");
+        assert!(
+            call.stream,
+            "step {idx} must use stream=true in native tool-call protocol"
+        );
         assert_eq!(
             call.tool_choice,
             Some(json!("auto")),
-            "step {idx} must send tool_choice=\"auto\" in Option A"
+            "step {idx} must send tool_choice=\"auto\" in native tool-call protocol"
         );
     }
 
@@ -425,18 +428,18 @@ fn test_e2e_option_a_streaming_sse_multistep_overlay_reads_commit_journal_and_un
 }
 
 // ============================================================================
-// 2. Option B JSON Action Protocol Setting & SQLite Persistence
+// 2. JSON Action Protocol Setting & SQLite Persistence
 // ============================================================================
 
 #[test]
-fn test_e2e_option_b_json_action_protocol_setting_and_persistence() {
-    let ws = TempWorkspace::new("opt_b_persistence");
+fn test_e2e_json_action_protocol_setting_and_persistence() {
+    let ws = TempWorkspace::new("json_protocol_persistence");
     let orig_lib = "pub const RETRY_LIMIT: usize = 3;\n";
     ws.write_rel("src/lib.rs", orig_lib);
     let sqlite_path = ws.path().join("persisted_session.sqlite3");
     let sqlite_str = sqlite_path.to_str().expect("utf8 sqlite path");
 
-    // Phase 1: Set `subagent_protocol` = `"json"` via JSON command and verify snapshot
+    // Step 1: Set `subagent_protocol` = `"json"` via JSON command and verify snapshot
     let (mut session1, fixture, server, tid1) = boot_http_loopback_session(&ws, Some(sqlite_str));
     let set_snap_raw = session1.dispatch_json_command(
         &json!({
@@ -451,7 +454,7 @@ fn test_e2e_option_b_json_action_protocol_setting_and_persistence() {
     assert_eq!(set_snap["subagentProtocol"].as_str(), Some("json"));
     drop(session1);
 
-    // Phase 2: Re-open SpellCoreSession from the same SQLite DB and verify persistence
+    // Step 2: Re-open SpellCoreSession from the same SQLite DB and verify persistence
     let mut session = SpellCoreSession::new(Some(sqlite_str)).expect("reopen persisted session");
     // Persisted endpoint URL and model IDs survive restart; only the in-memory API key is supplied.
     assert_eq!(session.model_id, FIXTURE_MAIN_MODEL_ID);
@@ -464,7 +467,7 @@ fn test_e2e_option_b_json_action_protocol_setting_and_persistence() {
         serde_json::from_str(&session.build_full_state_snapshot_json()).expect("reopened snapshot");
     assert_eq!(reopened_snap["subagent_protocol"].as_str(), Some("json"));
 
-    // Prime main prefix over HTTP SSE so subagent inherits `# Tools` schema (`tool_choice: "none"` in Option B)
+    // Prime main prefix over HTTP SSE so subagent inherits `# Tools` schema (`tool_choice: "none"` in JSON action protocol)
     let prime_raw = session.dispatch_json_command(
         &json!({
             "cmd": "send_prompt",
@@ -476,7 +479,7 @@ fn test_e2e_option_b_json_action_protocol_setting_and_persistence() {
     let prime_snap: Value = serde_json::from_str(&prime_raw).expect("prime snapshot");
     assert_eq!(prime_snap["ok"].as_bool(), Some(true));
 
-    // Queue Option B JSON steps: <think>plan</think> + fenced ```json ... ``` -> edit_file -> finish
+    // Queue JSON action protocol steps: <think>plan</think> + fenced ```json ... ``` -> edit_file -> finish
     fixture.push_subagent_step(ScriptedSubagentStep {
         content: concat!(
             "<think>plan: read src/lib.rs first before updating RETRY_LIMIT</think>\n",
@@ -506,7 +509,7 @@ fn test_e2e_option_b_json_action_protocol_setting_and_persistence() {
     fixture.push_subagent_step(ScriptedSubagentStep {
         content: json!({
             "action": "finish",
-            "summary": "Done via Option B"
+            "summary": "Done via JSON action protocol"
         })
         .to_string(),
         reasoning_content: String::new(),
@@ -518,12 +521,12 @@ fn test_e2e_option_b_json_action_protocol_setting_and_persistence() {
     let (output, status) = session
         .execute_delegate_coding_subagent_direct(
             &tid1,
-            "call-opt-b-1",
+            "call-json-proto-1",
             json!({
                 "instruction": "Bump RETRY_LIMIT from 3 to 8 in src/lib.rs"
             }),
         )
-        .expect("Option B delegation");
+        .expect("JSON action protocol delegation");
     assert_eq!(status, "completed");
 
     // Verify wire calls had `stream == false` and `tool_choice == Some("none")`
@@ -531,26 +534,26 @@ fn test_e2e_option_b_json_action_protocol_setting_and_persistence() {
     let del_calls = delegate_calls_only(&all_calls);
     assert_eq!(del_calls.len(), 3);
     for (idx, call) in del_calls.iter().enumerate() {
-        assert!(!call.stream, "Option B step {idx} must use stream=false");
+        assert!(!call.stream, "JSON action protocol step {idx} must use stream=false");
         assert_eq!(
             call.tool_choice,
             Some(json!("none")),
-            "Option B step {idx} with aligned tools must set tool_choice=\"none\""
+            "JSON action protocol step {idx} with aligned tools must set tool_choice=\"none\""
         );
     }
 
     // Verify disk commit and metadata
     assert_eq!(ws.read_rel("src/lib.rs"), "pub const RETRY_LIMIT: usize = 8;\n");
-    let meta = parse_delegation_result_meta(&output).expect("Option B meta");
+    let meta = parse_delegation_result_meta(&output).expect("JSON action protocol meta");
     assert_eq!(meta.status, "committed");
     assert_eq!(meta.protocol_used, "json");
     assert!(!meta.fallback_triggered);
-    assert_eq!(meta.summary, "Done via Option B");
+    assert_eq!(meta.summary, "Done via JSON action protocol");
     assert_eq!(meta.files.len(), 1);
 }
 
 // ============================================================================
-// 3. Sticky Fallback Trigger #1: JSON Action Emitted in Option A Native Content
+// 3. Sticky Fallback Trigger #1: JSON Action Emitted in Native Content
 // ============================================================================
 
 #[test]
@@ -643,7 +646,7 @@ fn test_e2e_sticky_fallback_trigger_2_two_consecutive_malformed_native_steps() {
         "edit_file",
         "{\"path\": \"src/lib.rs\", \"old_text\": UNQUOTED_BROKEN_JSON",
     )]);
-    // Step 1 (`Native`): unknown tool `"hallucinated_tool"` (malformed #2 -> triggers sticky switch to Option B!)
+    // Step 1 (`Native`): unknown tool `"hallucinated_tool"` (malformed #2 -> triggers sticky switch to JSON action protocol!)
     fixture.push_subagent_tool_calls(vec![make_tc(
         "tc_unknown_tool",
         "hallucinated_tool",
@@ -698,7 +701,7 @@ fn test_e2e_sticky_fallback_trigger_2_two_consecutive_malformed_native_steps() {
             .last()
             .and_then(|m| m.content.as_deref())
             .unwrap_or("")
-            .contains("[PROTOCOL SWITCH -> OPTION B JSON ACTION MODE]"),
+            .contains("[PROTOCOL SWITCH -> JSON ACTION MODE]"),
         "Step 2 must receive corrective sticky fallback switch prompt"
     );
     assert!(!del_calls[3].stream, "Step 3 remains in Json");

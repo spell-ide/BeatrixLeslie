@@ -1,6 +1,6 @@
 //! Conversation Rubric Tags (`tags.rs`) for BeatrixLeslie IDE (`spell_core`).
 //!
-//! Implements Decision 4: Replaces coding-only `skills` with general-purpose `tags`
+//! Replaces coding-only `skills` with general-purpose `tags`
 //! (`ConversationTag` & `TagRegistry`) applicable to any conversation rubric across
 //! research, writing, analysis, engineering, governance, and general workflows.
 //! Note: BeatrixLeslie IDE intentionally excludes any `spawn_agent` tool.
@@ -124,7 +124,7 @@ pub struct PreprocessedPrompt {
 impl PreprocessedPrompt {
     /// Returns `cleaned_prompt` if `tail_system_append` is empty, or appends
     /// `\n\n<turn_rubric_and_steering>\n...\n</turn_rubric_and_steering>` to `cleaned_prompt`
-    /// so `messages[0]` is never mutated mid-thread (`WIRE-03` & `G3`).
+    /// so `messages[0]` is never mutated mid-thread.
     pub fn build_tail_injected_user_message(&self) -> String {
         let tail = self.tail_system_append.trim();
         if tail.is_empty() {

@@ -1,0 +1,318 @@
+name: Build & Verify
+
+on:
+  workflow_call:
+    inputs:
+      checkout_ref:
+        description: 'Git ref to check out (empty defaults to triggering ref)'
+        required: false
+        type: string
+        default: ''
+      package_artifacts:
+        description: 'Package and upload distributable release artifacts'
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      MACOS_CERT_P12_BASE64:
+        required: false
+      MACOS_CERT_PASSWORD:
+        required: false
+      MACOS_CODESIGN_IDENTITY:
+        required: false
+      MACOS_NOTARY_APPLE_ID:
+        required: false
+      MACOS_NOTARY_TEAM_ID:
+        required: false
+      MACOS_NOTARY_PASSWORD:
+        required: false
+      WINDOWS_PFX_BASE64:
+        required: false
+      WINDOWS_PFX_PASSWORD:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: License & Dependency Audit
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.checkout_ref }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify third-party license notices
+        run: python3 scripts/generate_third_party_licenses.py --check
+
+      - name: Run cargo-deny audit
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: rust/spell_core/Cargo.toml
+          command: check
+          command-arguments: advisories bans licenses sources
+
+  macos:
+    name: macOS (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+          - arch: x86_64
+            runner: macos-15-intel
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.checkout_ref }}
+
+      - name: Install Homebrew dependencies
+        run: |
+          HOMEBREW_NO_AUTO_UPDATE=1 brew install cmake ninja qtbase qtsvg qscintilla2
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.arch == 'arm64' && 'aarch64-apple-darwin' || 'x86_64-apple-darwin' }}
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust/spell_core
+          shared-key: macos-${{ matrix.arch }}
+          cache-on-failure: true
+
+      - name: Configure Apple Developer ID signing and notarization (optional)
+        env:
+          MACOS_CERT_P12_BASE64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          MACOS_CODESIGN_IDENTITY: ${{ secrets.MACOS_CODESIGN_IDENTITY }}
+          MACOS_NOTARY_APPLE_ID: ${{ secrets.MACOS_NOTARY_APPLE_ID }}
+          MACOS_NOTARY_TEAM_ID: ${{ secrets.MACOS_NOTARY_TEAM_ID }}
+          MACOS_NOTARY_PASSWORD: ${{ secrets.MACOS_NOTARY_PASSWORD }}
+        run: |
+          if [[ -z "${MACOS_CERT_P12_BASE64}" ]]; then
+            echo "==> MACOS_CERT_P12_BASE64 not set; using ad-hoc bundle signing."
+            exit 0
+          fi
+
+          CERT_PATH="${RUNNER_TEMP}/spell-codesign.p12"
+          KEYCHAIN_PATH="${RUNNER_TEMP}/spell-codesign.keychain-db"
+          KEYCHAIN_PASS="$(uuidgen)"
+
+          printf '%s' "${MACOS_CERT_P12_BASE64}" | base64 --decode > "${CERT_PATH}"
+          security create-keychain -p "${KEYCHAIN_PASS}" "${KEYCHAIN_PATH}"
+          security set-keychain-settings -lut 21600 "${KEYCHAIN_PATH}"
+          security unlock-keychain -p "${KEYCHAIN_PASS}" "${KEYCHAIN_PATH}"
+
+          EXISTING_KEYCHAINS=()
+          while IFS= read -r kc; do
+            kc_clean="$(printf '%s' "${kc}" | sed -E 's/^[[:space:]]*"//; s/"[[:space:]]*$//')"
+            [[ -n "${kc_clean}" ]] && EXISTING_KEYCHAINS+=("${kc_clean}")
+          done < <(security list-keychains -d user)
+          security list-keychains -d user -s "${KEYCHAIN_PATH}" "${EXISTING_KEYCHAINS[@]}"
+
+          security import "${CERT_PATH}" -P "${MACOS_CERT_PASSWORD}" -A -t cert -f pkcs12 -k "${KEYCHAIN_PATH}"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "${KEYCHAIN_PASS}" "${KEYCHAIN_PATH}"
+
+          IDENTITY="${MACOS_CODESIGN_IDENTITY}"
+          if [[ -z "${IDENTITY}" ]]; then
+            IDENTITY="$(security find-identity -v -p codesigning "${KEYCHAIN_PATH}" | awk '/"Developer ID Application:/ {print $2; exit}')"
+          fi
+          if [[ -z "${IDENTITY}" ]]; then
+            echo "Error: Imported P12 certificate did not yield a valid codesigning identity." >&2
+            exit 1
+          fi
+          echo "SPELL_CODESIGN_IDENTITY=${IDENTITY}" >> "${GITHUB_ENV}"
+
+          if [[ -n "${MACOS_NOTARY_APPLE_ID}" && -n "${MACOS_NOTARY_TEAM_ID}" && -n "${MACOS_NOTARY_PASSWORD}" ]]; then
+            xcrun notarytool store-credentials "spell-notary" \
+              --apple-id "${MACOS_NOTARY_APPLE_ID}" \
+              --team-id "${MACOS_NOTARY_TEAM_ID}" \
+              --password "${MACOS_NOTARY_PASSWORD}" \
+              --keychain "${KEYCHAIN_PATH}"
+            echo "SPELL_NOTARIZE_PROFILE=spell-notary" >> "${GITHUB_ENV}"
+          fi
+
+      - name: Build, deploy Qt, test, and verify self-contained bundle
+        run: ./scripts/build_and_run.sh --arch ${{ matrix.arch }} --strict-warnings --install dist --deploy-qt --test --verify-loader
+
+      - name: Create macOS zip archive
+        if: inputs.package_artifacts
+        run: |
+          ditto -c -k --sequesterRsrc --keepParent dist/BeatrixLeslieIDE.app "BeatrixLeslieIDE-macos-${{ matrix.arch }}.zip"
+
+      - name: Upload macOS archive
+        if: inputs.package_artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: BeatrixLeslieIDE-macos-${{ matrix.arch }}
+          path: BeatrixLeslieIDE-macos-${{ matrix.arch }}.zip
+          if-no-files-found: error
+
+      - name: Clean up temporary signing keychain
+        if: always()
+        run: |
+          if [[ -f "${RUNNER_TEMP}/spell-codesign.keychain-db" ]]; then
+            security delete-keychain "${RUNNER_TEMP}/spell-codesign.keychain-db" || true
+          fi
+          rm -f "${RUNNER_TEMP}/spell-codesign.p12"
+
+  linux:
+    name: Linux (Ubuntu 24.04 x86_64)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.checkout_ref }}
+
+      - name: Install APT dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            ninja-build \
+            pkg-config \
+            patchelf \
+            file \
+            qt6-base-dev \
+            qt6-base-dev-tools \
+            qt6-svg-dev \
+            qt6-wayland \
+            libqscintilla2-qt6-dev \
+            libdbus-1-dev \
+            libsecret-1-dev \
+            libgl1-mesa-dev \
+            libxkbcommon-dev \
+            libxcb-cursor0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust/spell_core
+          cache-on-failure: true
+
+      - name: Build, deploy Qt, test, and verify self-contained bundle
+        run: |
+          ARGS=(--strict-warnings --install dist --deploy-qt --test --verify-loader)
+          if [[ "${{ inputs.package_artifacts }}" == "true" ]]; then
+            ARGS+=(--package-appimage BeatrixLeslieIDE-linux-x86_64.AppImage)
+          fi
+          ./scripts/build_and_run.sh "${ARGS[@]}"
+
+      - name: Create Linux tar.gz archive
+        if: inputs.package_artifacts
+        run: |
+          cp -a dist BeatrixLeslieIDE-linux-x86_64
+          tar -czf BeatrixLeslieIDE-linux-x86_64.tar.gz BeatrixLeslieIDE-linux-x86_64
+
+      - name: Upload Linux AppImage
+        if: inputs.package_artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: BeatrixLeslieIDE-linux-x86_64-AppImage
+          path: BeatrixLeslieIDE-linux-x86_64.AppImage
+          if-no-files-found: error
+
+      - name: Upload Linux tar.gz archive
+        if: inputs.package_artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: BeatrixLeslieIDE-linux-x86_64-tar-gz
+          path: BeatrixLeslieIDE-linux-x86_64.tar.gz
+          if-no-files-found: error
+
+  windows:
+    name: Windows (MSVC x86_64)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.checkout_ref }}
+
+      - name: Configure MSVC developer command prompt
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust/spell_core
+          cache-on-failure: true
+
+      - name: Install Qt 6
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.7.*'
+          cache: true
+
+      - name: Cache QScintilla 2.14.1 (Windows MSVC)
+        uses: actions/cache@v4
+        with:
+          path: C:\qscintilla-cache
+          key: qscintilla-2.14.1-qt6.7-msvc-x64-v1
+
+      - name: Build and install QScintilla 2.14.1
+        shell: pwsh
+        run: .\scripts\install_qscintilla_windows.ps1 -CacheDir C:\qscintilla-cache
+
+      - name: Configure Windows Authenticode certificate (optional)
+        shell: pwsh
+        env:
+          WINDOWS_PFX_BASE64: ${{ secrets.WINDOWS_PFX_BASE64 }}
+          WINDOWS_PFX_PASSWORD: ${{ secrets.WINDOWS_PFX_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_PFX_BASE64)) {
+              Write-Host "==> WINDOWS_PFX_BASE64 not set; skipping Authenticode signing."
+              exit 0
+          }
+          $PfxPath = Join-Path $env:RUNNER_TEMP "spell-codesign.pfx"
+          [System.IO.File]::WriteAllBytes($PfxPath, [System.Convert]::FromBase64String($env:WINDOWS_PFX_BASE64))
+          "SPELL_WINDOWS_PFX_PATH=$PfxPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          if (-not [string]::IsNullOrWhiteSpace($env:WINDOWS_PFX_PASSWORD)) {
+              "SPELL_WINDOWS_PFX_PASSWORD=$($env:WINDOWS_PFX_PASSWORD)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          }
+
+      - name: Build, deploy Qt, test, and verify loader
+        shell: pwsh
+        run: .\scripts\build_and_run.ps1 -StrictWarnings -InstallPrefix dist -DeployQt -Test -VerifyLoader
+
+      - name: Create Windows zip archive
+        if: inputs.package_artifacts
+        shell: pwsh
+        run: Compress-Archive -Path "dist\bin\*" -DestinationPath "BeatrixLeslieIDE-windows-x86_64.zip" -Force
+
+      - name: Upload Windows archive
+        if: inputs.package_artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: BeatrixLeslieIDE-windows-x86_64
+          path: BeatrixLeslieIDE-windows-x86_64.zip
+          if-no-files-found: error
+
+      - name: Clean up temporary Authenticode PFX
+        if: always()
+        shell: pwsh
+        run: |
+          $PfxPath = Join-Path $env:RUNNER_TEMP "spell-codesign.pfx"
+          if (Test-Path -LiteralPath $PfxPath) {
+              Remove-Item -LiteralPath $PfxPath -Force -ErrorAction SilentlyContinue
+          }

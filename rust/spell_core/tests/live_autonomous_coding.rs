@@ -9,7 +9,7 @@
 //! ```bash
 //! SPELL_LIVE_ENDPOINT=http://127.0.0.1:11434/v1 \
 //!   SPELL_LIVE_MODEL=qwen2.5-coder:7b \
-//!   cargo test --test phase4_live_autonomous_coding -- --ignored --nocapture
+//!   cargo test --test live_autonomous_coding -- --ignored --nocapture
 //! ```
 
 use std::collections::BTreeMap;
@@ -101,9 +101,9 @@ impl TempCrateWorkspace {
     fn seed(label: &str) -> Result<Self, String> {
         let seq = TEMP_SEQ.fetch_add(1, Ordering::SeqCst);
         let pid = std::process::id();
-        let root = std::env::temp_dir().join(format!("spell_phase4_crate_{pid}_{seq}_{label}"));
+        let root = std::env::temp_dir().join(format!("spell_live_crate_{pid}_{seq}_{label}"));
         let target_dir =
-            std::env::temp_dir().join(format!("spell_phase4_target_{pid}_{seq}_{label}"));
+            std::env::temp_dir().join(format!("spell_live_target_{pid}_{seq}_{label}"));
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&target_dir);
 
@@ -201,7 +201,7 @@ fn live_coding_config_parsing_and_seed_crate_scaffold() {
 
 #[test]
 #[ignore]
-fn phase4_live_autonomous_coding_rust_crate_roundtrip() {
+fn live_autonomous_coding_rust_crate_roundtrip() {
     let Some(cfg) = LiveCodingConfig::from_env() else {
         println!("Skipping live autonomous coding test: SPELL_LIVE_ENDPOINT is not set.");
         return;
@@ -258,7 +258,7 @@ fn phase4_live_autonomous_coding_rust_crate_roundtrip() {
     });
 
     let (output, tool_status) = session
-        .execute_delegate_coding_subagent_direct(&thread.id, "live_phase4_call_1", args)
+        .execute_delegate_coding_subagent_direct(&thread.id, "live_coding_call_1", args)
         .expect("execute_delegate_coding_subagent_direct");
     assert_eq!(tool_status, "completed", "unexpected tool_status: {output}");
 

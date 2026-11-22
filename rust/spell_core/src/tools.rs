@@ -2,7 +2,7 @@
 //! OpenAI Tool Schema Builder, and Clean-Room System Prompt Builder for BeatrixLeslie IDE (`spell_core`).
 //!
 //! Key capabilities:
-//! - **Constants (`C5`)**: `DEFAULT_MAX_AUTO_EXPAND_LINES` (1,500), `MAX_SINGLE_FILE_CHARS` (48,000),
+//! - **Constants**: `DEFAULT_MAX_AUTO_EXPAND_LINES` (1,500), `MAX_SINGLE_FILE_CHARS` (48,000),
 //!   `MAX_TOTAL_TOOL_CHARS` (96,000).
 //! - **Permissions & Profiles**: `AgentProfile` (`Write`, `Ask`) and `ToolPermissionPolicy`
 //!   (`Allow`, `Confirm`, `Deny`).
@@ -24,7 +24,8 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use regex::RegexBuilder;
+use once_cell::sync::Lazy;
+use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -36,7 +37,7 @@ use crate::tags::{format_tags_rubric_block, ConversationTag, TagRegistry};
 pub const DUPLICATE_FILE_REF_TAG: &str = "duplicate_file_ref";
 
 // ============================================================================
-// Constants (C5) & Hook 2 / Hook 3
+// Constants
 // ============================================================================
 
 /// Default maximum lines automatically expanded when `read_file` is called without explicit
@@ -50,8 +51,8 @@ pub const MAX_SINGLE_FILE_CHARS: usize = 48_000;
 /// Maximum cumulative tool output characters across a turn/context window (`96,000` chars).
 pub const MAX_TOTAL_TOOL_CHARS: usize = 96_000;
 
-/// Maximum line length for Hook 3 unrestricted reads: `usize::MAX` (zero line truncation).
-pub const HOOK3_MAX_LINE_LEN: usize = usize::MAX;
+/// Maximum line length for unrestricted reads: `usize::MAX` (zero line truncation).
+pub const UNBOUNDED_READ_MAX_LINE_LEN: usize = usize::MAX;
 
 /// Banner emitted when a local agent wakeup timer fires.
 pub const SCHEDULE_WAKEUP_BANNER: &str = "[SPELL AGENT TIMER ALARM FIRED]";
@@ -103,7 +104,7 @@ pub enum ToolPermissionPolicy {
     Deny,
 }
 
-/// Folder-level capability access tier (`VULN-02` / `G5`).
+/// Folder-level capability access tier.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FolderAccessTier {
@@ -133,7 +134,7 @@ impl FolderAccessTier {
     }
 }
 
-/// Environment variable names scrubbed from spawned child processes (`VULN-04` / `G6`).
+/// Environment variable names scrubbed from spawned child processes.
 pub const SCRUBBED_SENSITIVE_ENV_VARS: [&str; 5] = [
     "SPELL_API_KEY",
     "OPENAI_API_KEY",
@@ -324,7 +325,7 @@ pub fn enclosing_symbol_range(
 }
 
 // ============================================================================
-// Workspace Path Resolution (`resolve_workspace_path`) & Guardrails (`VULN-01`, `VULN-02`, `G4`, `G5`)
+// Workspace Path Resolution (`resolve_workspace_path`) & Guardrails
 // ============================================================================
 
 fn check_single_path_for_protected_globs(path_str: &str) -> Result<(), ToolError> {
@@ -374,7 +375,7 @@ fn check_single_path_for_protected_globs(path_str: &str) -> Result<(), ToolError
     Ok(())
 }
 
-/// Enforces the Protected Globs Matrix (`VULN-01` / `G4`) across both `raw_input` and `canonical_path`:
+/// Enforces the Protected Globs Matrix across both `raw_input` and `canonical_path`:
 /// - `.git/config` or any path inside `.git/hooks` (`.git/hooks/*`)
 /// - `.env` or `.env.*` (e.g., `.env.local`, `.env.production`)
 /// - `/.ssh/` or ending with `/.ssh`, `/.aws/` or ending with `/.aws`
@@ -440,7 +441,7 @@ pub fn enforce_research_cache_write_guard(path: &Path) -> Result<(), ToolError> 
 
 /// Returns `true` if `rel_path` targets an auto-loaded workspace instruction file or build/IDE hook
 /// (`AGENTS.md`, `CLAUDE.md`, `.rules`, `.cursorrules`, `build.rs`, `.cargo/config.toml`,
-/// `.git/hooks/*`, `.vscode/tasks.json`, `.zed/tasks.json`), matched case-insensitively for macOS APFS (`Catch #3`).
+/// `.git/hooks/*`, `.vscode/tasks.json`, `.zed/tasks.json`), matched case-insensitively for macOS APFS.
 pub fn is_web_taint_sensitive_workspace_file(rel_path: &str) -> bool {
     let (cleaned, _, _) = strip_path_line_col_suffix(rel_path);
     let normalized = cleaned.trim().replace('\\', "/");
@@ -576,7 +577,7 @@ fn canonicalize_ancestor_and_join_tail(path: &Path) -> Result<PathBuf, ToolError
     }
 }
 
-/// Ancestor-based canonical path resolver across multiple `allowed_roots` (`VULN-01` & `G4`):
+/// Ancestor-based canonical path resolver across multiple `allowed_roots`:
 /// 1. Rejects raw inputs starting with `~` (`~/...` or `~`) unless they canonicalize inside one of `allowed_roots`.
 /// 2. Constructs the full candidate path (stripping leading `<worktree_name>/` prefix when relative, then joining onto `primary_root`).
 /// 3. Checks existing prefix components for symlinks pointing outside `allowed_roots`, and walks up `full_candidate` until the deepest existing ancestor on disk is found.
@@ -740,7 +741,7 @@ pub fn canonicalize_target_path_multi(
     Ok(canonical_target)
 }
 
-/// Ancestor-based canonical path resolver confining `candidate` strictly within `workspace_root` (`VULN-01` & `G4`).
+/// Ancestor-based canonical path resolver confining `candidate` strictly within `workspace_root`.
 pub fn canonicalize_target_path(
     workspace_root: &Path,
     candidate: &Path,
@@ -890,7 +891,7 @@ pub fn resolve_workspace_path_with_roots(
     Ok(canonical_target)
 }
 
-/// Resolves `raw_path` strictly confined within `project_root` (`VULN-01` & `G4`):
+/// Resolves `raw_path` strictly confined within `project_root`:
 /// - Enforces `enforce_protected_globs` (`.git/config`, `.git/hooks/*`, `.env*`, `.ssh`, `.aws`).
 /// - Strips trailing `:line:col` or `#L123-L456`.
 /// - Resolves relative and `<worktree_name>/...` paths via `canonicalize_target_path(project_root, ...)`,
@@ -899,7 +900,7 @@ pub fn resolve_workspace_path(project_root: &Path, raw_path: &str) -> Result<Pat
     resolve_workspace_path_with_roots(project_root, &[], raw_path)
 }
 
-/// Canonical workspace root ACL path validation helper (`Decision 3` & `VULN-01`).
+/// Canonical workspace root ACL path validation helper.
 pub fn validate_path(project_root: &Path, raw_path: &str) -> Result<PathBuf, ToolError> {
     resolve_workspace_path(project_root, raw_path)
 }
@@ -1091,7 +1092,7 @@ impl TurnPinCache {
             return Ok(pinned.clone());
         }
 
-        // 2. Perform Hook 3 unrestricted read.
+        // 2. Perform unrestricted read.
         let content = read_file_unrestricted(path, start_line, end_line)?;
         let canonical_key = path.to_string_lossy().to_string();
         let sha256_short = compute_sha256_short_hex(&content);
@@ -1158,7 +1159,7 @@ impl TurnPinCache {
 // Tool 1: `read_file` (`read_file_unrestricted` + `read_file_auto_expand`)
 // ============================================================================
 
-/// Hook 3: Reads a file with zero line truncation (`max_line_len = usize::MAX`) and NO 16 KB
+/// Reads a file with zero line truncation (`max_line_len = usize::MAX`) and NO 16 KB
 /// symbol-outline replacement.
 ///
 /// - Enforces protected-glob path guardrails.
@@ -1209,7 +1210,7 @@ pub fn read_file_unrestricted(
         if i > 0 {
             selected.push('\n');
         }
-        let slice_len = line.len().min(HOOK3_MAX_LINE_LEN);
+        let slice_len = line.len().min(UNBOUNDED_READ_MAX_LINE_LEN);
         selected.push_str(&line[..slice_len]);
     }
     Ok(selected)
@@ -1836,10 +1837,10 @@ pub fn grep_workspace_regex(
 
 // ============================================================================
 // Tool 11: `terminal` (`validate_allow_scoped_command`,
-// Process-Group Timeout & `/usr/sbin/taskpolicy -b` E-core QoS wrapper — `VULN-04` & `G6`)
+// Process-Group Timeout & `/usr/sbin/taskpolicy -b` E-core QoS wrapper)
 // ============================================================================
 
-/// Validates `command` against an `Allow-Scoped` regular expression (`VULN-04` & `G6`):
+/// Validates `command` against an `Allow-Scoped` regular expression:
 /// 1. Rejects shell chaining, subshell, and redirection metacharacters (`;`, `&&`, `||`, `|`, `>`, `<`, `` ` ``, `$(`, `\n`, `\r`).
 /// 2. Compiles `allowed_regex` via `regex::Regex::new` and verifies `re.is_match(command.trim())`,
 ///    returning `Err(ToolError::PermissionDenied(...))` if it does not match.
@@ -2041,6 +2042,8 @@ pub fn run_terminal_command_in_dir(
                     {
                         let pgid = child.id() as i32;
                         if pgid > 0 {
+                            // SAFETY: `child` was spawned with `process_group(0)`, so `-pgid` signals
+                            // only this child's process group (`pgid > 0`) on timeout.
                             unsafe {
                                 libc::kill(-pgid, libc::SIGKILL);
                             }
@@ -2109,7 +2112,7 @@ pub fn run_terminal_command_in_dir(
 
 /// Executes a shell command (`sh -c`) inside `project_root` under the Seatbelt sandbox wrapper (network allowed),
 /// environment credential scrubbing, process-group timeout termination, and optional Apple Silicon
-/// E-core QoS (`VULN-04` & `G6`).
+/// E-core QoS.
 pub fn run_terminal_command(
     project_root: &Path,
     command: &str,
@@ -2224,7 +2227,7 @@ pub fn execute_fetch_tool_with_online_config(
 }
 
 // ============================================================================
-// Tool 13: Hook 2 Autonomous Agent Timer (`schedule_wakeup`)
+// Tool 13: Autonomous Agent Timer (`schedule_wakeup`)
 // ============================================================================
 
 /// Structured watch target for `schedule_wakeup` (`{"kind": "file_tail", "path": "..."}`).
@@ -2251,7 +2254,7 @@ fn default_wakeup_label() -> String {
     "wakeup-timer".to_string()
 }
 
-/// Input schema for Hook 2 `schedule_wakeup`.
+/// Input schema for `schedule_wakeup`.
 ///
 /// Accepts:
 /// - `duration_s` or `duration_secs`
@@ -2372,7 +2375,7 @@ impl ScheduleWakeupInput {
     }
 }
 
-/// Formats the wakeup message injected into the agent thread when a Hook 2 timer expires.
+/// Formats the wakeup message injected into the agent thread when a wakeup timer expires.
 pub fn format_schedule_wakeup_banner(input: &ScheduleWakeupInput) -> String {
     let mut msg = format!(
         "{} Timer '{}' ({}s) expired.\nAlarm Note: {}",
@@ -2400,7 +2403,7 @@ pub fn format_schedule_wakeup_banner(input: &ScheduleWakeupInput) -> String {
     msg
 }
 
-/// Executes a Hook 2 wakeup timer with millisecond-precision testability and optional sleep override.
+/// Executes a wakeup timer with millisecond-precision testability and optional sleep override.
 pub fn run_schedule_wakeup_blocking(
     input: &ScheduleWakeupInput,
     override_sleep: Option<Duration>,
@@ -2413,7 +2416,7 @@ pub fn run_schedule_wakeup_blocking(
     format_schedule_wakeup_banner(input)
 }
 
-/// Thread-safe registry of active/fired Hook 2 timers for both native and MCP timer inspection.
+/// Thread-safe registry of active/fired wakeup timers for both native and MCP timer inspection.
 #[derive(Debug, Clone)]
 pub struct TimerRecord {
     pub timer_id: String,
@@ -3752,11 +3755,11 @@ pub fn build_clean_system_prompt(
 }
 
 // ============================================================================
-// Phase 2 (`G5` & `G9`): $O(\log N)$ `WorkspaceSnapshotStore` & `Stage-Write` Shadow Overlay
+// $O(\log N)$ `WorkspaceSnapshotStore` & `Stage-Write` Shadow Overlay
 // ============================================================================
 
 /// Pre-indexed file snapshot with precomputed line-start byte offsets (`line_offsets`)
-/// and full 64-character SHA-256 hex digest (`G5` & `G9`).
+/// and full 64-character SHA-256 hex digest.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileSnapshot {
     pub path: PathBuf,
@@ -3825,7 +3828,7 @@ impl FileSnapshot {
     }
 }
 
-/// Structured line entry inside a unified diff hunk (`G5`).
+/// Structured line entry inside a unified diff hunk.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DiffHunkLine {
     /// `"header" | "context" | "add" | "remove"`
@@ -3835,7 +3838,7 @@ pub struct DiffHunkLine {
     pub text: String,
 }
 
-/// Staged file mutation tracked inside [`WorkspaceSnapshotStore`]'s shadow overlay (`G5`).
+/// Staged file mutation tracked inside [`WorkspaceSnapshotStore`]'s shadow overlay.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StagedFileMutation {
     pub path: PathBuf,
@@ -4193,7 +4196,7 @@ fn write_staged_file_nofollow(target: &Path, content: &str) -> Result<(), ToolEr
     })
 }
 
-/// Workspace snapshot store and `Stage-Write` shadow overlay (`G5` & `G9`).
+/// Workspace snapshot store and `Stage-Write` shadow overlay.
 #[derive(Clone, Debug, Default)]
 pub struct WorkspaceSnapshotStore {
     pub snapshots: HashMap<PathBuf, FileSnapshot>,
@@ -4284,7 +4287,7 @@ impl WorkspaceSnapshotStore {
         Ok(snap)
     }
 
-    /// Stages a write mutation in `self.staged_overlay` without modifying the on-disk file (`G5`).
+    /// Stages a write mutation in `self.staged_overlay` without modifying the on-disk file.
     pub fn stage_write(
         &mut self,
         canonical_path: &Path,
@@ -4506,10 +4509,10 @@ impl WorkspaceSnapshotStore {
 }
 
 // ============================================================================
-// Phase 2 (`G9`): Structural AST / Symbol Outline Queries (`outline_symbols` & `get_symbol_body`)
+// Structural AST / Symbol Outline Queries (`outline_symbols` & `get_symbol_body`)
 // ============================================================================
 
-/// Structural symbol outline entry extracted from Rust, Swift, or Python source files (`G9`).
+/// Structural symbol outline entry extracted from Rust, Swift, or Python source files.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SymbolOutlineEntry {
     pub name: String,
@@ -5017,7 +5020,7 @@ fn compute_python_block_end_line(lines: &[&str], start_line_idx: usize) -> usize
 }
 
 /// Extracts structural symbol outline entries (`[start_line, end_line]`) for Rust, Swift,
-/// and Python source code (`G9`).
+/// and Python source code.
 pub fn extract_outline_symbols(content: &str) -> Vec<SymbolOutlineEntry> {
     if content.trim().is_empty() {
         return Vec::new();
@@ -5222,7 +5225,7 @@ pub fn get_symbol_body(
 }
 
 /// Extracts symbol outlines for `canonical_path` through [`WorkspaceSnapshotStore::get_or_load_snapshot`]
-/// so `Stage-Write` shadow overlay mutations are automatically reflected (`G5` & `G9`).
+/// so `Stage-Write` shadow overlay mutations are automatically reflected.
 pub fn outline_symbols_in_snapshot(
     store: &mut WorkspaceSnapshotStore,
     canonical_path: &Path,
@@ -5232,7 +5235,7 @@ pub fn outline_symbols_in_snapshot(
 }
 
 /// Retrieves a symbol's outline metadata and 1-indexed body through [`WorkspaceSnapshotStore::get_or_load_snapshot`]
-/// so `Stage-Write` shadow overlay mutations are automatically reflected (`G5` & `G9`).
+/// so `Stage-Write` shadow overlay mutations are automatically reflected.
 pub fn get_symbol_body_in_snapshot(
     store: &mut WorkspaceSnapshotStore,
     canonical_path: &Path,
@@ -5249,14 +5252,14 @@ pub fn get_symbol_body_in_snapshot(
 }
 
 // ============================================================================
-// Phase 2 (`G9`): Structured Diagnostics Bus (`StructuredDiagnostic` & `DiagnosticsRingBuffer`)
+// Structured Diagnostics Bus (`StructuredDiagnostic` & `DiagnosticsRingBuffer`)
 // ============================================================================
 
 /// Default maximum number of diagnostics retained in [`DiagnosticsRingBuffer`].
 pub const DEFAULT_DIAGNOSTICS_RING_CAPACITY: usize = 256;
 
 /// Normalized compiler diagnostic entry parsed from `cargo check --message-format=json`,
-/// `rustc`, or `swiftc` output (`G9`).
+/// `rustc`, or `swiftc` output.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StructuredDiagnostic {
     pub file: String,
@@ -5268,7 +5271,7 @@ pub struct StructuredDiagnostic {
     pub message: String,
 }
 
-/// Bounded ring buffer of [`StructuredDiagnostic`] entries (`G9`).
+/// Bounded ring buffer of [`StructuredDiagnostic`] entries.
 #[derive(Clone, Debug)]
 pub struct DiagnosticsRingBuffer {
     entries: VecDeque<StructuredDiagnostic>,
@@ -5354,16 +5357,18 @@ impl DiagnosticsRingBuffer {
     /// Ingests `cargo check --message-format=json` lines where `"reason": "compiler-message"`,
     /// and falls back to parsing standard `rustc` `error[E...]: ... \n --> file:line:col` blocks.
     pub fn ingest_cargo_json_output(&mut self, output: &str) -> usize {
+        static RUSTC_HDR_RE: Lazy<Regex> = Lazy::new(|| {
+            Regex::new(r"^\s*(?P<sev>error|warning|note)(?:\[(?P<code>[^\]]+)\])?:\s*(?P<msg>.+)$")
+                .expect("valid RUSTC_HDR_RE pattern")
+        });
+        static RUSTC_SPAN_RE: Lazy<Regex> = Lazy::new(|| {
+            Regex::new(r"^\s*-->\s*(?P<file>[^:\n]+):(?P<line>\d+):(?P<col>\d+)")
+                .expect("valid RUSTC_SPAN_RE pattern")
+        });
+
         let mut added = 0usize;
         let lines: Vec<&str> = output.lines().collect();
         let mut idx = 0usize;
-
-        let rustc_hdr_re = regex::Regex::new(
-            r"^\s*(?P<sev>error|warning|note)(?:\[(?P<code>[^\]]+)\])?:\s*(?P<msg>.+)$",
-        )
-        .unwrap();
-        let rustc_span_re =
-            regex::Regex::new(r"^\s*-->\s*(?P<file>[^:\n]+):(?P<line>\d+):(?P<col>\d+)").unwrap();
 
         while idx < lines.len() {
             let trimmed = lines[idx].trim();
@@ -5427,11 +5432,11 @@ impl DiagnosticsRingBuffer {
                 continue;
             }
 
-            if let Some(hdr_caps) = rustc_hdr_re.captures(lines[idx]) {
+            if let Some(hdr_caps) = RUSTC_HDR_RE.captures(lines[idx]) {
                 let lookahead_end = (idx + 4).min(lines.len());
                 let mut matched_span = None;
                 for next_i in (idx + 1)..lookahead_end {
-                    if let Some(span_caps) = rustc_span_re.captures(lines[next_i]) {
+                    if let Some(span_caps) = RUSTC_SPAN_RE.captures(lines[next_i]) {
                         matched_span = Some((next_i, span_caps));
                         break;
                     }
@@ -5479,18 +5484,21 @@ impl DiagnosticsRingBuffer {
 
     /// Ingests `swiftc` diagnostic lines (`file.swift:line:col: error: message` and `warning:` / `note:`).
     pub fn ingest_swiftc_output(&mut self, output: &str) -> usize {
+        static SWIFTC_DIAG_RE: Lazy<Regex> = Lazy::new(|| {
+            Regex::new(
+                r"^\s*(?P<file>[^\n:]+):(?P<line>\d+):(?P<col>\d+):\s*(?P<sev>error|warning|note)(?:\[(?P<code>[^\]]+)\])?:\s*(?P<msg>.+)$",
+            )
+            .expect("valid SWIFTC_DIAG_RE pattern")
+        });
+
         let mut added = 0usize;
-        let swiftc_re = regex::Regex::new(
-            r"^\s*(?P<file>[^\n:]+):(?P<line>\d+):(?P<col>\d+):\s*(?P<sev>error|warning|note)(?:\[(?P<code>[^\]]+)\])?:\s*(?P<msg>.+)$",
-        )
-        .unwrap();
 
         for line in output.lines() {
             let trimmed = line.trim();
             if trimmed.starts_with('{') || trimmed.starts_with("-->") {
                 continue;
             }
-            if let Some(caps) = swiftc_re.captures(trimmed) {
+            if let Some(caps) = SWIFTC_DIAG_RE.captures(trimmed) {
                 let file = caps
                     .name("file")
                     .map(|m| m.as_str().trim().to_string())
@@ -6075,12 +6083,12 @@ def next_fn():
     }
 
     #[test]
-    fn test_decision3_app_sandbox_compatibility_and_in_process_guards() {
+    fn test_app_sandbox_compatibility_and_in_process_guards() {
         let _env_guard = SANDBOX_ENV_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let ws = std::env::temp_dir()
-            .join(format!("spell_decision3_app_sandbox_{}", std::process::id()));
+            .join(format!("spell_app_sandbox_guards_{}", std::process::id()));
         let _ = fs::remove_dir_all(&ws);
         fs::create_dir_all(&ws).unwrap();
 
@@ -6377,7 +6385,7 @@ def next_fn():
     }
 
     #[test]
-    fn test_catch3_is_web_taint_sensitive_workspace_file_apfs_case_insensitive() {
+    fn test_is_web_taint_sensitive_workspace_file_apfs_case_insensitive() {
         for sensitive in [
             "AGENTS.md",
             "agents.md",

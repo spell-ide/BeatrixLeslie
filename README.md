@@ -31,15 +31,33 @@ The working directory and recent output are attached. The agent picks it up from
 
 ## Install
 
+### Downloads
+
+Prebuilt archives and `SHA256SUMS.txt` are published on [GitHub Releases](https://github.com/spell-ide/BeatrixLeslie/releases):
+
+| Platform | Artifact |
+| :-- | :-- |
+| macOS 14+ (Apple Silicon) | `BeatrixLeslieIDE-macos-arm64.zip` |
+| macOS 14+ (Intel) | `BeatrixLeslieIDE-macos-x86_64.zip` |
+| Linux x86_64 (AppImage) | `BeatrixLeslieIDE-linux-x86_64.AppImage` |
+| Linux x86_64 (Portable archive) | `BeatrixLeslieIDE-linux-x86_64.tar.gz` |
+| Windows 10/11 x86_64 | `BeatrixLeslieIDE-windows-x86_64.zip` |
+
+First launch for unsigned builds:
+
+- **macOS:** `xattr -dr com.apple.quarantine /Applications/BeatrixLeslieIDE.app`
+- **Linux:** `chmod +x BeatrixLeslieIDE-linux-x86_64.AppImage && ./BeatrixLeslieIDE-linux-x86_64.AppImage`
+- **Windows:** SmartScreen → **More info** → **Run anyway**
+
 ### Requirements
 
 | Platform | Toolchain |
 | :-- | :-- |
-| macOS 14+ | Xcode CLT, Rust, `brew install cmake qtbase qtsvg qscintilla2` |
-| Ubuntu / Debian | `build-essential cmake pkg-config qt6-base-dev qt6-svg-dev libqscintilla2-qt6-dev libdbus-1-dev libsecret-1-dev`, Rust |
-| Fedora | `gcc-c++ cmake pkgconf-pkg-config qt6-qtbase-devel qt6-qtsvg-devel qscintilla-qt6-devel dbus-devel libsecret-devel`, Rust |
-| Arch | `base-devel cmake pkgconf qt6-base qt6-svg qscintilla-qt6 dbus libsecret`, Rust |
-| Windows 10/11 | Visual Studio 2022 (C++), Rust (MSVC), `vcpkg install qtbase qtsvg qscintilla` |
+| macOS 14+ | Xcode CLT, Rust, `brew install cmake ninja qtbase qtsvg qscintilla2` |
+| Ubuntu / Debian | `build-essential cmake ninja-build pkg-config patchelf file qt6-base-dev qt6-base-dev-tools qt6-svg-dev qt6-wayland libqscintilla2-qt6-dev libdbus-1-dev libsecret-1-dev libgl1-mesa-dev libxkbcommon-dev libxcb-cursor0`, Rust |
+| Fedora | `gcc-c++ cmake ninja-build pkgconf-pkg-config patchelf file qt6-qtbase-devel qt6-qtsvg-devel qt6-qtwayland-devel qscintilla-qt6-devel dbus-devel libsecret-devel`, Rust |
+| Arch | `base-devel cmake ninja pkgconf patchelf file qt6-base qt6-svg qt6-wayland qscintilla-qt6 dbus libsecret`, Rust |
+| Windows 10/11 | Visual Studio 2022 (C++), Rust (MSVC), Qt 6.7+ (`msvc2019_64` / `msvc2022_64` on `PATH`), `.\scripts\install_qscintilla_windows.ps1` |
 
 Rust: https://rustup.rs
 
@@ -51,16 +69,23 @@ cd BeatrixLeslie
 ./scripts/build_and_run.sh --test --verify-loader --run
 ```
 
-macOS self-contained `.app`:
+macOS self-contained `.app` (optional Developer ID signing / notarization via `--codesign-identity <id> --notarize-profile <profile>`):
 
 ```bash
 ./scripts/build_and_run.sh --install dist --deploy-qt --test --verify-loader
 ```
 
-Windows:
+Linux self-contained bundle and AppImage:
+
+```bash
+./scripts/build_and_run.sh --install dist --deploy-qt --test --verify-loader --package-appimage BeatrixLeslieIDE-linux-x86_64.AppImage
+```
+
+Windows (from Visual Studio 2022 Developer PowerShell with Qt 6 `bin` on `PATH`):
 
 ```powershell
-.\scripts\build_and_run.ps1 -Test -VerifyLoader -DeployQt -Run
+.\scripts\install_qscintilla_windows.ps1
+.\scripts\build_and_run.ps1 -InstallPrefix dist -DeployQt -Test -VerifyLoader -Run
 ```
 
 Manual:
@@ -92,9 +117,9 @@ API keys go in the OS keychain. Nothing is written to disk in plaintext. Until a
 
 ---
 
-## Contributing
+## Contributing & Security
 
-See [`CONTRIBUTING.md`](CONTRIBUTING.md).
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`SECURITY.md`](SECURITY.md).
 
 ---
 

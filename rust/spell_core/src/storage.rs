@@ -5,7 +5,7 @@
 //!   `sqlite3_close`, `sqlite3_exec`, and `sqlite3_free`).
 //! - Relational and KV document tables (`kv_documents`, `projects`, `threads`, `messages`,
 //!   `tags`, `tool_permissions`).
-//! - **C6 Exact Wire History Preservation**: Stores exact OpenAI `WireMessage` JSON
+//! - **Exact Wire History Preservation**: Stores exact OpenAI `WireMessage` JSON
 //!   (including `reasoning_content`, `tool_calls`, and `tool_call_id`) alongside rich
 //!   presentation `UiChatEvent` items so resending multi-turn history never invalidates
 //!   prefix caches.
@@ -20,7 +20,8 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use libsqlite3_sys::{
-    sqlite3, sqlite3_close, sqlite3_exec, sqlite3_free, sqlite3_open, SQLITE_OK,
+    sqlite3, sqlite3_busy_timeout, sqlite3_close, sqlite3_exec, sqlite3_free, sqlite3_open,
+    SQLITE_OK,
 };
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -82,6 +83,9 @@ extern "C" fn sqlite_collect_rows_callback(
     if arg.is_null() || argc <= 0 {
         return 0;
     }
+    // SAFETY: `arg` points to the caller's stack-allocated `Vec<SqlRow>` passed to `sqlite3_exec`,
+    // and SQLite guarantees `argv` and `col_names` hold `argc` valid or null C-string pointers for
+    // the duration of the callback.
     unsafe {
         let rows = &mut *(arg as *mut Vec<SqlRow>);
         let count = argc as usize;
@@ -118,11 +122,15 @@ struct SqliteConnection {
     raw: *mut sqlite3,
 }
 
+// SAFETY: Access to the underlying `sqlite3*` handle is serialized through a `Mutex`, and bundled
+// SQLite is compiled in serialized/multi-thread safe mode so moving the handle across threads is sound.
 unsafe impl Send for SqliteConnection {}
 
 impl Drop for SqliteConnection {
     fn drop(&mut self) {
         if !self.raw.is_null() {
+            // SAFETY: `self.raw` is a valid open `sqlite3*` handle owned uniquely by `self`, and
+            // setting it to null prevents double-close.
             unsafe {
                 let _ = sqlite3_close(self.raw);
             }
@@ -132,7 +140,7 @@ impl Drop for SqliteConnection {
 }
 
 // ============================================================================
-// Persisted Domain Models (C6 — Exact Wire History + UI Presentation Events)
+// Persisted Domain Models (Exact Wire History + UI Presentation Events)
 // ============================================================================
 
 /// Persisted workspace project metadata (Pane 1).
@@ -329,7 +337,7 @@ impl UiChatEvent {
         }
     }
 
-    /// Creates an engine timer wakeup alarm banner event (Decision 2).
+    /// Creates an engine timer wakeup alarm banner event.
     pub fn engine_timer_alarm(banner: impl Into<String>) -> Self {
         Self {
             id: next_storage_id("ev-alarm"),
@@ -360,7 +368,7 @@ impl UiChatEvent {
     }
 }
 
-/// Persisted multi-turn conversation thread (C6 — Exact Wire History Preservation).
+/// Persisted multi-turn conversation thread (preserving exact wire history).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct StoredThread {
     pub id: String,
@@ -420,31 +428,30 @@ impl StoredThread {
 }
 
 // ============================================================================
-// SpellStorage — Real SQLite3 Engine Store
+// RawSqliteStore & SpellStorage — Real SQLite3 Engine Store
 // ============================================================================
 
-/// Thread-safe SQLite3 persistence layer backed by bundled SQLite3 (`libsqlite3-sys`).
-#[derive(Clone)]
-pub struct SpellStorage {
-    conn: Arc<Mutex<SqliteConnection>>,
+/// Schema-free, thread-safe SQLite3 store backed by bundled SQLite3 (`libsqlite3-sys`).
+pub(crate) struct RawSqliteStore {
+    conn: Mutex<SqliteConnection>,
     db_path: String,
 }
 
-impl std::fmt::Debug for SpellStorage {
+impl std::fmt::Debug for RawSqliteStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SpellStorage")
+        f.debug_struct("RawSqliteStore")
             .field("db_path", &self.db_path)
             .finish()
     }
 }
 
-impl SpellStorage {
-    /// Opens or creates a SQLite3 database at `db_path` (or `":memory:"` for in-memory storage).
-    pub fn open(db_path: impl AsRef<Path>) -> Result<Self, String> {
-        let path_ref = db_path.as_ref();
-        let path_str = path_ref.to_string_lossy().into_owned();
+impl RawSqliteStore {
+    /// Opens or creates a raw SQLite3 database at `db_path` (creating parent directories when
+    /// `db_path != ":memory:"`) with an optional `busy_timeout_ms`, without running schema DDL.
+    pub(crate) fn open(db_path: &Path, busy_timeout_ms: Option<i32>) -> Result<Self, String> {
+        let path_str = db_path.to_string_lossy().into_owned();
         if path_str != ":memory:" {
-            if let Some(parent) = path_ref.parent() {
+            if let Some(parent) = db_path.parent() {
                 if !parent.as_os_str().is_empty() {
                     fs::create_dir_all(parent).map_err(|e| {
                         format!(
@@ -455,11 +462,12 @@ impl SpellStorage {
                 }
             }
         }
-        Self::open_str(&path_str)
+        Self::open_str(&path_str, busy_timeout_ms)
     }
 
-    /// Opens a SQLite3 database from a string path or `":memory:"`.
-    pub fn open_str(db_path: &str) -> Result<Self, String> {
+    /// Opens or creates a raw SQLite3 database from a string path or `":memory:"` without running
+    /// [`SpellStorage::init_schema`].
+    pub(crate) fn open_str(db_path: &str, busy_timeout_ms: Option<i32>) -> Result<Self, String> {
         let target = if db_path.trim().is_empty() {
             ":memory:"
         } else {
@@ -477,9 +485,11 @@ impl SpellStorage {
         let c_filename =
             CString::new(target).map_err(|e| format!("Invalid SQLite path '{target}': {e}"))?;
         let mut raw_db: *mut sqlite3 = std::ptr::null_mut();
+        // SAFETY: `c_filename` is a valid NUL-terminated C string and `raw_db` is a valid out-pointer.
         let rc = unsafe { sqlite3_open(c_filename.as_ptr(), &mut raw_db) };
         if rc != SQLITE_OK || raw_db.is_null() {
             if !raw_db.is_null() {
+                // SAFETY: `raw_db` was returned by `sqlite3_open` and is closed immediately on failure.
                 unsafe {
                     let _ = sqlite3_close(raw_db);
                 }
@@ -489,21 +499,20 @@ impl SpellStorage {
             ));
         }
 
-        let store = Self {
-            conn: Arc::new(Mutex::new(SqliteConnection { raw: raw_db })),
+        if let Some(ms) = busy_timeout_ms {
+            // SAFETY: `raw_db` is an open, exclusively owned `sqlite3*` handle.
+            unsafe {
+                let _ = sqlite3_busy_timeout(raw_db, ms);
+            }
+        }
+
+        Ok(Self {
+            conn: Mutex::new(SqliteConnection { raw: raw_db }),
             db_path: target.to_string(),
-        };
-        store.init_schema()?;
-        Ok(store)
+        })
     }
 
-    /// Opens an isolated in-memory SQLite3 database (`":memory:"`).
-    pub fn new_in_memory() -> Result<Self, String> {
-        Self::open_str(":memory:")
-    }
-
-    /// Returns the path or `":memory:"` identifier for this database.
-    pub fn db_path(&self) -> &str {
+    pub(crate) fn db_path(&self) -> &str {
         &self.db_path
     }
 
@@ -516,6 +525,8 @@ impl SpellStorage {
         let mut rows: Vec<SqlRow> = Vec::new();
         let mut errmsg_ptr: *mut c_char = std::ptr::null_mut();
 
+        // SAFETY: `raw_db` is a valid open `sqlite3*` protected by our `Mutex`, `c_sql` is a valid
+        // NUL-terminated SQL string, `rows` outlives `sqlite3_exec`, and `errmsg_ptr` is a valid out-pointer.
         let rc = unsafe {
             sqlite3_exec(
                 raw_db,
@@ -528,7 +539,10 @@ impl SpellStorage {
 
         if rc != SQLITE_OK {
             let err_str = if !errmsg_ptr.is_null() {
+                // SAFETY: Non-null `errmsg_ptr` from `sqlite3_exec` is a valid NUL-terminated C string
+                // allocated by SQLite that must be released with `sqlite3_free`.
                 let s = unsafe { CStr::from_ptr(errmsg_ptr).to_string_lossy().into_owned() };
+                // SAFETY: `errmsg_ptr` was allocated by `sqlite3_exec` and is freed once here.
                 unsafe {
                     sqlite3_free(errmsg_ptr as *mut c_void);
                 }
@@ -540,6 +554,7 @@ impl SpellStorage {
         }
 
         if !errmsg_ptr.is_null() {
+            // SAFETY: Non-null `errmsg_ptr` from `sqlite3_exec` must be freed via `sqlite3_free`.
             unsafe {
                 sqlite3_free(errmsg_ptr as *mut c_void);
             }
@@ -548,9 +563,56 @@ impl SpellStorage {
     }
 
     /// Executes one or more SQL statements and returns any result rows as `Vec<SqlRow>`.
-    pub fn execute_sql(&self, sql: &str) -> Result<Vec<SqlRow>, String> {
+    pub(crate) fn execute_sql(&self, sql: &str) -> Result<Vec<SqlRow>, String> {
         let guard = self.conn.lock();
         Self::execute_sql_locked(guard.raw, sql)
+    }
+}
+
+/// Thread-safe SQLite3 persistence layer backed by bundled SQLite3 (`libsqlite3-sys`).
+#[derive(Clone)]
+pub struct SpellStorage {
+    raw: Arc<RawSqliteStore>,
+}
+
+impl std::fmt::Debug for SpellStorage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SpellStorage")
+            .field("db_path", &self.raw.db_path())
+            .finish()
+    }
+}
+
+impl SpellStorage {
+    /// Opens or creates a SQLite3 database at `db_path` (or `":memory:"` for in-memory storage).
+    pub fn open(db_path: impl AsRef<Path>) -> Result<Self, String> {
+        let raw = RawSqliteStore::open(db_path.as_ref(), None)?;
+        let store = Self { raw: Arc::new(raw) };
+        store.init_schema()?;
+        Ok(store)
+    }
+
+    /// Opens a SQLite3 database from a string path or `":memory:"`.
+    pub fn open_str(db_path: &str) -> Result<Self, String> {
+        let raw = RawSqliteStore::open_str(db_path, None)?;
+        let store = Self { raw: Arc::new(raw) };
+        store.init_schema()?;
+        Ok(store)
+    }
+
+    /// Opens an isolated in-memory SQLite3 database (`":memory:"`).
+    pub fn new_in_memory() -> Result<Self, String> {
+        Self::open_str(":memory:")
+    }
+
+    /// Returns the path or `":memory:"` identifier for this database.
+    pub fn db_path(&self) -> &str {
+        self.raw.db_path()
+    }
+
+    /// Executes one or more SQL statements and returns any result rows as `Vec<SqlRow>`.
+    pub fn execute_sql(&self, sql: &str) -> Result<Vec<SqlRow>, String> {
+        self.raw.execute_sql(sql)
     }
 
     /// Initializes the relational and document schema for `SpellStorage`.
@@ -843,7 +905,7 @@ impl SpellStorage {
     }
 
     /// Loads a `StoredThread` by ID, reconstructing exact `wire_messages` from the relational
-    /// `messages` table if needed so C6 prefix-cache invariance is guaranteed.
+    /// `messages` table if needed so prefix-cache invariance is guaranteed.
     pub fn get_thread(&self, thread_id: &str) -> Result<Option<StoredThread>, String> {
         let sql = format!(
             "SELECT json_payload, wire_messages_json FROM threads WHERE id = '{}' LIMIT 1;",
@@ -1223,8 +1285,8 @@ impl SpellStorage {
             None => String::new(),
         };
 
-        let guard = self.conn.lock();
-        Self::execute_sql_locked(guard.raw, "BEGIN IMMEDIATE;")?;
+        let guard = self.raw.conn.lock();
+        RawSqliteStore::execute_sql_locked(guard.raw, "BEGIN IMMEDIATE;")?;
 
         let select_sql = format!(
             "SELECT id, thread_id, label, note, duration_s, created_at_ms, fire_at_ms, \
@@ -1233,16 +1295,16 @@ impl SpellStorage {
              WHERE status = 'armed' AND delivered = 0 AND fire_at_ms <= {now_ms}{thread_filter} \
              ORDER BY fire_at_ms ASC, created_at_ms ASC;"
         );
-        let rows = match Self::execute_sql_locked(guard.raw, &select_sql) {
+        let rows = match RawSqliteStore::execute_sql_locked(guard.raw, &select_sql) {
             Ok(r) => r,
             Err(e) => {
-                let _ = Self::execute_sql_locked(guard.raw, "ROLLBACK;");
+                let _ = RawSqliteStore::execute_sql_locked(guard.raw, "ROLLBACK;");
                 return Err(e);
             }
         };
 
         if rows.is_empty() {
-            let _ = Self::execute_sql_locked(guard.raw, "COMMIT;");
+            let _ = RawSqliteStore::execute_sql_locked(guard.raw, "COMMIT;");
             return Ok(Vec::new());
         }
 
@@ -1262,12 +1324,12 @@ impl SpellStorage {
         }
 
         if !update_sql.is_empty() {
-            if let Err(e) = Self::execute_sql_locked(guard.raw, &update_sql) {
-                let _ = Self::execute_sql_locked(guard.raw, "ROLLBACK;");
+            if let Err(e) = RawSqliteStore::execute_sql_locked(guard.raw, &update_sql) {
+                let _ = RawSqliteStore::execute_sql_locked(guard.raw, "ROLLBACK;");
                 return Err(e);
             }
         }
-        Self::execute_sql_locked(guard.raw, "COMMIT;")?;
+        RawSqliteStore::execute_sql_locked(guard.raw, "COMMIT;")?;
         Ok(popped)
     }
 
@@ -1278,14 +1340,14 @@ impl SpellStorage {
             return Ok(false);
         }
         let now_secs = now_unix_secs();
-        let guard = self.conn.lock();
+        let guard = self.raw.conn.lock();
         let sql = format!(
             "UPDATE timers SET status = 'cancelled', delivered = 1, updated_at = {now_secs} \
              WHERE id = '{}' AND status != 'cancelled' AND delivered = 0; \
              SELECT changes() AS changed;",
             sql_escape(tid)
         );
-        let rows = Self::execute_sql_locked(guard.raw, &sql)?;
+        let rows = RawSqliteStore::execute_sql_locked(guard.raw, &sql)?;
         let changed = rows
             .first()
             .and_then(|r| Self::row_get(r, "changed"))
@@ -1301,7 +1363,7 @@ mod tests {
     use crate::contract::{WireToolCall, WireToolFunction};
 
     #[test]
-    fn test_sqlite_in_memory_c6_exact_wire_history_roundtrip() {
+    fn test_sqlite_in_memory_exact_wire_history_roundtrip() {
         let storage = SpellStorage::new_in_memory().expect("open :memory: sqlite");
 
         // 1. Project persistence
@@ -1312,7 +1374,7 @@ mod tests {
 
         // 2. Thread with exact WireMessage including reasoning_content, tool_calls, and tool_call_id
         let mut thread = StoredThread::new(
-            "thread-c6-01",
+            "thread-wire-01",
             "proj-1",
             "Prefix Cache Verification",
             "write",
@@ -1330,7 +1392,7 @@ mod tests {
             role: "assistant".to_string(),
             content: Some(String::new()),
             reasoning_content: Some(
-                "Checking README.md with Hook 3 zero-truncation reader.".to_string(),
+                "Checking README.md with unbounded zero-truncation reader.".to_string(),
             ),
             tool_calls: Some(vec![WireToolCall {
                 id: "call_read_01".to_string(),
@@ -1367,11 +1429,11 @@ mod tests {
 
         storage.upsert_thread(&thread).unwrap();
 
-        let reloaded = storage.get_thread("thread-c6-01").unwrap().unwrap();
+        let reloaded = storage.get_thread("thread-wire-01").unwrap().unwrap();
         assert_eq!(reloaded.wire_messages.len(), 3);
         assert_eq!(
             reloaded.wire_messages[1].reasoning_content.as_deref(),
-            Some("Checking README.md with Hook 3 zero-truncation reader.")
+            Some("Checking README.md with unbounded zero-truncation reader.")
         );
         assert_eq!(
             reloaded.wire_messages[1]

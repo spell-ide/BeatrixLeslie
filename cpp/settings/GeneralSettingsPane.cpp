@@ -287,7 +287,7 @@ protected:
         labelFont.setPointSizeF(9.5);
         p.setFont(labelFont);
 
-        const int count = m_entries.size();
+        const int count = static_cast<int>(m_entries.size());
         for (int i = 0; i < count; ++i) {
             const QRectF cell = cellRect(i);
             p.setPen(QPen(compositeOver(m_ui.divider, m_ui.background), 1.0));

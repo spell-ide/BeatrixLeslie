@@ -148,6 +148,7 @@ pub unsafe extern "C" fn spell_session_new(db_path: *const c_char) -> *mut Spell
         let path_opt = if db_path.is_null() {
             None
         } else {
+            // SAFETY: Caller guarantees non-null `db_path` points to a valid NUL-terminated C string.
             CStr::from_ptr(db_path)
                 .to_str()
                 .ok()
@@ -155,9 +156,12 @@ pub unsafe extern "C" fn spell_session_new(db_path: *const c_char) -> *mut Spell
                 .filter(|s| !s.is_empty())
         };
 
-        let session = SpellCoreSession::new(path_opt).unwrap_or_else(|_| {
-            SpellCoreSession::new_in_memory().expect("Fallback in-memory SpellCoreSession")
-        });
+        let session = match SpellCoreSession::new(path_opt)
+            .or_else(|_| SpellCoreSession::new_in_memory())
+        {
+            Ok(s) => s,
+            Err(_) => return std::ptr::null_mut(),
+        };
         Box::into_raw(Box::new(session))
     }));
     res.unwrap_or(std::ptr::null_mut())
@@ -171,6 +175,7 @@ pub unsafe extern "C" fn spell_session_new(db_path: *const c_char) -> *mut Spell
 pub unsafe extern "C" fn spell_session_free(ptr: *mut SpellCoreSession) {
     if !ptr.is_null() {
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // SAFETY: Caller guarantees non-null `ptr` was allocated via `Box::into_raw` in `spell_session_new`.
             let _ = Box::from_raw(ptr);
         }));
     }
@@ -189,14 +194,15 @@ pub unsafe extern "C" fn spell_session_dispatch_json(
 ) -> *mut c_char {
     install_ffi_panic_hook_once();
     if ptr.is_null() {
-        return CString::new("{\"ok\":false,\"error\":\"Null SpellCoreSession pointer\"}")
-            .unwrap()
+        return CString::from(c"{\"ok\":false,\"error\":\"Null SpellCoreSession pointer\"}")
             .into_raw();
     }
+    // SAFETY: Caller guarantees `ptr` is a valid, exclusively borrowed `SpellCoreSession` pointer.
     let session = &mut *ptr;
     let cmd_str = if cmd_json.is_null() {
         "{\"cmd\":\"get_snapshot\"}"
     } else {
+        // SAFETY: Caller guarantees non-null `cmd_json` points to a valid NUL-terminated C string.
         CStr::from_ptr(cmd_json)
             .to_str()
             .unwrap_or("{\"cmd\":\"get_snapshot\"}")
@@ -221,7 +227,9 @@ pub unsafe extern "C" fn spell_session_dispatch_json(
         response_json
     };
     CString::new(sanitized)
-        .unwrap_or_else(|_| CString::new("{\"ok\":false,\"error\":\"CString encoding error\"}").unwrap())
+        .unwrap_or_else(|_| {
+            CString::from(c"{\"ok\":false,\"error\":\"CString encoding error\"}")
+        })
         .into_raw()
 }
 
@@ -233,6 +241,7 @@ pub unsafe extern "C" fn spell_session_dispatch_json(
 #[no_mangle]
 pub unsafe extern "C" fn spell_free_string(ptr: *mut c_char) {
     if !ptr.is_null() {
+        // SAFETY: Caller guarantees non-null `ptr` was allocated via `CString::into_raw` in this crate.
         let _ = CString::from_raw(ptr);
     }
 }
@@ -262,7 +271,7 @@ pub extern "C" fn spell_get_cached_snapshot_json() -> *mut c_char {
         cached
     };
     CString::new(sanitized)
-        .unwrap_or_else(|_| CString::new("{\"ok\":false}").unwrap())
+        .unwrap_or_else(|_| CString::from(c"{\"ok\":false}"))
         .into_raw()
 }
 
@@ -285,6 +294,7 @@ pub unsafe extern "C" fn spell_terminal_publish(state_json: *const c_char) -> bo
     if state_json.is_null() {
         return false;
     }
+    // SAFETY: Caller guarantees non-null `state_json` points to a valid NUL-terminated C string.
     let Ok(text) = CStr::from_ptr(state_json).to_str() else {
         return false;
     };
@@ -308,11 +318,11 @@ pub extern "C" fn spell_terminal_take_approved_inputs() -> *mut c_char {
     let inputs = terminal_bridge::TERMINAL_BRIDGE.take_approved();
     let json = serde_json::to_string(&inputs).unwrap_or_else(|_| "[]".to_string());
     CString::new(json.replace('\0', ""))
-        .unwrap_or_else(|_| CString::new("[]").unwrap())
+        .unwrap_or_else(|_| CString::from(c"[]"))
         .into_raw()
 }
 
-/// C-ABI wrapper for Hook 3 `read_file_unrestricted`.
+/// C-ABI wrapper for `read_file_unrestricted`.
 ///
 /// # Safety
 /// `path_ptr` must be a valid null-terminated C string.
@@ -324,11 +334,12 @@ pub unsafe extern "C" fn spell_read_file_unrestricted(
     end_line: usize,
 ) -> *mut c_char {
     if path_ptr.is_null() {
-        return CString::new("IO_ERROR: null path_ptr").unwrap().into_raw();
+        return CString::from(c"IO_ERROR: null path_ptr").into_raw();
     }
+    // SAFETY: Caller guarantees non-null `path_ptr` points to a valid NUL-terminated C string.
     let path_str = match CStr::from_ptr(path_ptr).to_str() {
         Ok(s) => s,
-        Err(_) => return CString::new("IO_ERROR: invalid UTF-8 path").unwrap().into_raw(),
+        Err(_) => return CString::from(c"IO_ERROR: invalid UTF-8 path").into_raw(),
     };
     let start = if start_line == 0 { None } else { Some(start_line) };
     let end = if end_line == 0 { None } else { Some(end_line) };
@@ -344,12 +355,12 @@ pub unsafe extern "C" fn spell_read_file_unrestricted(
         output
     };
     CString::new(sanitized)
-        .unwrap_or_else(|_| CString::new("IO_ERROR: interior NUL byte").unwrap())
+        .unwrap_or_else(|_| CString::from(c"IO_ERROR: interior NUL byte"))
         .into_raw()
 }
 
 // ============================================================================
-// Comprehensive Cross-Module Verification Suite (C1–C6, Decisions 1–4, MCP, FFI)
+// Comprehensive Cross-Module Verification Suite (Transport, Storage, MCP, FFI)
 // ============================================================================
 
 #[cfg(test)]
@@ -373,7 +384,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     #[test]
-    fn test_c1_stable_prompt_cache_key_across_epochs() {
+    fn test_stable_prompt_cache_key_across_epochs() {
         // Default mode: prompt_cache_key stays stable as `thread_id` across all epochs
         assert_eq!(resolve_prompt_cache_key("thread-alpha", 0, false), "thread-alpha");
         assert_eq!(resolve_prompt_cache_key("thread-alpha", 1, false), "thread-alpha");
@@ -388,7 +399,7 @@ mod tests {
     }
 
     #[test]
-    fn test_c2_loopback_verify_server_401_without_auth_and_200_with_auth() {
+    fn test_loopback_verify_server_401_without_auth_and_200_with_auth() {
         let fixture = Arc::new(FixtureTransport::new());
         let expected_key = "test-spell-secret-key";
         let server = LoopbackVerifyServer::start(fixture, expected_key).unwrap();
@@ -423,14 +434,14 @@ mod tests {
     }
 
     #[test]
-    fn test_c3_and_decision2_engine_owned_timers_single_alarm_injection() {
+    fn test_engine_owned_timers_single_alarm_injection() {
         let transport = FixtureTransport::new();
         let timer = transport
             .set_timer(&SetTimerRequest {
                 duration_s: 5.0,
                 note: "Inspect background job".to_string(),
                 label: "job-check".to_string(),
-                thread_id: "thread-c3".to_string(),
+                thread_id: "thread-timer".to_string(),
                 watch_target: Some(json!({"kind": "file_tail", "path": "Cargo.toml"})),
             })
             .unwrap();
@@ -455,7 +466,7 @@ mod tests {
             reasoning_effort: None,
             tools: None,
             tool_choice: None,
-            prompt_cache_key: Some("thread-c3".to_string()),
+            prompt_cache_key: Some("thread-timer".to_string()),
             client_compaction_epoch: Some(0),
             auto_compact_min_tps: Some(ENGINE_MIN_DECODE_TPS),
             ..Default::default()
@@ -474,7 +485,7 @@ mod tests {
     }
 
     #[test]
-    fn test_c4_and_decision3_engine_owned_compaction_never_slices_ide_messages() {
+    fn test_engine_owned_compaction_never_slices_ide_messages() {
         let mut session = crate::test_support::fixture_session().unwrap();
         let tid = session.selected_thread_id.clone().unwrap();
 
@@ -497,13 +508,13 @@ mod tests {
     }
 
     #[test]
-    fn test_c5_read_file_caps_path_resolution_guardrail_and_sha256_deduplication() {
+    fn test_read_file_caps_path_resolution_guardrail_and_sha256_deduplication() {
         assert_eq!(DEFAULT_MAX_AUTO_EXPAND_LINES, 1_500);
         assert_eq!(MAX_SINGLE_FILE_CHARS, 48_000);
         assert_eq!(MAX_TOTAL_TOOL_CHARS, 96_000);
 
         let tmp_dir =
-            std::env::temp_dir().join(format!("spell_c5_verify_{}", std::process::id()));
+            std::env::temp_dir().join(format!("spell_read_caps_verify_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp_dir);
         create_directory(&tmp_dir).unwrap();
 
@@ -547,12 +558,12 @@ mod tests {
     }
 
     #[test]
-    fn test_c6_sqlite_wire_messages_roundtrip_preserves_reasoning_and_tool_calls() {
+    fn test_sqlite_wire_messages_roundtrip_preserves_reasoning_and_tool_calls() {
         let store = SpellStorage::new_in_memory().unwrap();
         let mut thread = StoredThread::new(
-            "thread-c6",
+            "thread-wire-rt",
             "proj-1",
-            "C6 Roundtrip Thread",
+            "Wire History Roundtrip Thread",
             "write",
             vec!["systems-architecture".to_string()],
         );
@@ -562,7 +573,7 @@ mod tests {
                 Some(String::new()),
                 Some("Step-by-step reasoning that must remain byte-identical.".to_string()),
                 Some(vec![WireToolCall {
-                    id: "call_c6_01".to_string(),
+                    id: "call_wire_01".to_string(),
                     r#type: "function".to_string(),
                     function: WireToolFunction {
                         name: "read_file".to_string(),
@@ -572,14 +583,14 @@ mod tests {
                 }]),
             ),
             WireMessage::tool(
-                "call_c6_01",
+                "call_wire_01",
                 Some("read_file".to_string()),
                 "[package]\nname = \"spell_core\"",
             ),
         ];
 
         store.upsert_thread(&thread).unwrap();
-        let loaded = store.get_thread("thread-c6").unwrap().unwrap();
+        let loaded = store.get_thread("thread-wire-rt").unwrap().unwrap();
         assert_eq!(loaded.wire_messages, thread.wire_messages);
         assert_eq!(
             loaded.wire_messages[1].reasoning_content.as_deref(),
@@ -587,12 +598,12 @@ mod tests {
         );
         assert_eq!(
             loaded.wire_messages[1].tool_calls.as_ref().unwrap()[0].id,
-            "call_c6_01"
+            "call_wire_01"
         );
     }
 
     #[test]
-    fn test_decision4_conversation_rubric_tags_and_no_spawn_agent() {
+    fn test_conversation_rubric_tags_and_no_spawn_agent() {
         let reg = TagRegistry::new();
         assert!(reg.list_tags().len() >= 5);
         assert!(reg.get_tag("research-synthesis").is_some());
@@ -708,6 +719,8 @@ mod tests {
 
     #[test]
     fn test_c_abi_session_ffi_lifecycle() {
+        // SAFETY: Valid `CString` pointers and balanced `spell_session_new`/`spell_session_free`
+        // and `spell_session_dispatch_json`/`spell_free_string` pairs are exercised on one thread.
         unsafe {
             let mem = CString::new(":memory:").unwrap();
             let handle = spell_session_new(mem.as_ptr());
@@ -819,7 +832,7 @@ mod tests {
         session.tag_registry.upsert_tag(scoped_tag);
 
         let thread = session
-            .create_thread(None, Some("G3 Thread"), Some("write"), vec![])
+            .create_thread(None, Some("Rubric Steering Thread"), Some("write"), vec![])
             .unwrap();
 
         // Turn 1: Baseline turn without tags

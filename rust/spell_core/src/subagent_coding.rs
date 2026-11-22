@@ -1,5 +1,5 @@
 //! Autonomous Multi-Step Coding Subagent (`delegate_coding_subagent`):
-//! Protocol Router, Sticky Option A -> Option B Fallback State Machine, Option B JSON Action Parser,
+//! Protocol Router, Sticky Native -> JSON Action Fallback State Machine, JSON Action Step Parser,
 //! 9-Tool Subagent Allowlist & Argument Validator, `DelegationOverlay` Shadow Filesystem & Search
 //! Helpers, `DelegationUndoRecord` Transactional Restore, and `<subagent_coding_result>` Metadata.
 
@@ -36,7 +36,7 @@ pub const MAX_DELEGATION_UNDO_RECORDS: usize = 64;
 pub const DELEGATION_META_COMMENT_PREFIX: &str = "<!-- spell_delegation_meta: ";
 
 /// Exact 9-tool allowlist exposed inside `delegate_coding_subagent`
-/// (shared identically across Option A native tool calls and Option B JSON actions).
+/// (shared identically across native tool-call protocol and JSON action protocol).
 pub const SUBAGENT_ALLOWED_TOOLS: [&str; 9] = [
     "read_file",
     "grep",
@@ -81,15 +81,15 @@ pub fn clamp_delegation_max_steps(raw: Option<u64>) -> usize {
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SubagentProtocol {
-    /// Starts with Option A (`Native` streaming tool calls) and falls back stickily to
-    /// Option B (`Json`) if content parses as a JSON action or after 2 consecutive or cumulative
-    /// malformed native steps.
+    /// Starts with the native tool-call protocol (`Native` streaming tool calls) and falls back
+    /// stickily to the JSON action protocol (`Json`) if content parses as a JSON action or after
+    /// 2 consecutive or cumulative malformed native steps.
     #[default]
     Auto,
-    /// Starts with Option A (`Native` streaming tool calls), with sticky safety fallback on
-    /// JSON-in-content or 2 consecutive or cumulative malformed native steps (§2).
+    /// Starts with the native tool-call protocol (`Native` streaming tool calls), with sticky
+    /// safety fallback on JSON-in-content or 2 consecutive or cumulative malformed native steps.
     Native,
-    /// Runs Option B (`Json` single-action JSON objects) from Step 0.
+    /// Runs the JSON action protocol (`Json` single-action JSON objects) from Step 0.
     Json,
 }
 
@@ -98,8 +98,8 @@ impl SubagentProtocol {
     /// defaulting unknown or empty values to [`SubagentProtocol::Auto`].
     pub fn from_wire(raw: &str) -> Self {
         match raw.trim().to_ascii_lowercase().as_str() {
-            "native" | "option_a" | "tool_calls" | "tools" => Self::Native,
-            "json" | "option_b" | "json_action" => Self::Json,
+            "native" | "tool_calls" | "tools" => Self::Native,
+            "json" | "json_action" => Self::Json,
             _ => Self::Auto,
         }
     }
@@ -118,9 +118,9 @@ impl SubagentProtocol {
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ActiveStepProtocol {
-    /// Option A: OpenAI-compatible streaming native `tool_calls`.
+    /// Native tool-call protocol: OpenAI-compatible streaming native `tool_calls`.
     Native,
-    /// Option B: Single JSON object (`{"action": "<tool>", ...}`) in assistant text content.
+    /// JSON action protocol: single JSON object (`{"action": "<tool>", ...}`) in assistant text content.
     Json,
 }
 
@@ -130,8 +130,8 @@ impl ActiveStepProtocol {
     pub fn initial(setting: SubagentProtocol, arg_override: Option<&str>) -> Self {
         let effective = match arg_override.map(str::trim).filter(|s| !s.is_empty()) {
             Some(raw) => match raw.to_ascii_lowercase().as_str() {
-                "native" | "option_a" | "tool_calls" | "tools" => SubagentProtocol::Native,
-                "json" | "option_b" | "json_action" => SubagentProtocol::Json,
+                "native" | "tool_calls" | "tools" => SubagentProtocol::Native,
+                "json" | "json_action" => SubagentProtocol::Json,
                 "auto" => SubagentProtocol::Auto,
                 _ => setting,
             },
@@ -204,15 +204,15 @@ impl DelegationMode {
 // Sticky Fallback State Machine (`ProtocolFallbackTracker`)
 // ============================================================================
 
-/// Number of consecutive or cumulative malformed Option A native steps that trigger a sticky
-/// fallback to Option B (`Json`).
+/// Number of consecutive or cumulative malformed native tool-call steps that trigger a sticky
+/// fallback to the JSON action protocol (`Json`).
 pub const MALFORMED_STEP_FALLBACK_THRESHOLD: usize = 2;
 
-/// Per-delegation sticky protocol router implementing §2 of `subagent_autonomous_coding_design.md`.
+/// Per-delegation sticky protocol router.
 ///
 /// Starts in `ActiveStepProtocol::initial(setting, arg_override)` and transitions stickily from
-/// `Native` (Option A) to `Json` (Option B) when either:
-/// 1. A native step produces no `tool_calls`, and its text content parses as a valid Option B JSON action.
+/// `Native` (native tool-call protocol) to `Json` (JSON action protocol) when either:
+/// 1. A native step produces no `tool_calls`, and its text content parses as a valid JSON action.
 /// 2. Two (`>= 2`) consecutive or cumulative native steps are malformed (bad JSON args, unknown tool,
 ///    missing required field, or leaked/unclosed `<tool_call>` syntax).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -244,21 +244,21 @@ impl ProtocolFallbackTracker {
         }
     }
 
-    /// Records a valid Option A native tool-call step, resetting `consecutive_malformed` to `0`
+    /// Records a valid native tool-call step, resetting `consecutive_malformed` to `0`
     /// while preserving `total_malformed` so interleaved malformed steps still trigger fallback.
     pub fn on_valid_native_step(&mut self) {
         self.consecutive_malformed = 0;
     }
 
-    /// Triggers an immediate sticky switch from Option A (`Native`) to Option B (`Json`) when a
-    /// native step returned no `tool_calls` and its text content parsed as a valid JSON action.
+    /// Triggers an immediate sticky switch from `Native` to `Json` when a native step returned no
+    /// `tool_calls` and its text content parsed as a valid JSON action.
     pub fn on_json_action_in_native_content(&mut self) {
         self.active = ActiveStepProtocol::Json;
         self.fallback_triggered = true;
         self.consecutive_malformed = 0;
     }
 
-    /// Records a malformed Option A step and switches stickily to Option B (`Json`) once
+    /// Records a malformed native step and switches stickily to `Json` once
     /// `consecutive_malformed >= MALFORMED_STEP_FALLBACK_THRESHOLD || total_malformed >= MALFORMED_STEP_FALLBACK_THRESHOLD`.
     /// Returns `true` (`switched_now`) on the exact step that triggered the transition.
     pub fn on_malformed_native_step(&mut self) -> bool {
@@ -572,13 +572,18 @@ pub fn validate_subagent_tool_call(
             }
             map.insert("summary".to_string(), Value::String(summary));
         }
-        _ => unreachable!("guarded by SUBAGENT_ALLOWED_TOOLS check"),
+        _ => {
+            return Err(SubagentStepValidationError::MalformedStep(format!(
+                "Unknown subagent tool '{name}'. Allowed tools: {}.",
+                SUBAGENT_ALLOWED_TOOLS.join(", ")
+            )));
+        }
     }
 
     Ok(Value::Object(map))
 }
 
-/// Builds the 9-tool OpenAI function schema array for Option A native tool-calling steps on
+/// Builds the 9-tool OpenAI function schema array for native tool-call protocol steps on
 /// coding subagent.
 pub fn build_subagent_openai_tools_schema() -> Vec<Value> {
     vec![
@@ -738,7 +743,7 @@ pub fn build_subagent_openai_tools_schema() -> Vec<Value> {
 }
 
 // ============================================================================
-// Option B JSON Action Parser (`parse_option_b_json_action` & `contains_malformed_tool_attempt`)
+// JSON Action Step Parser (`parse_json_action_step` & `contains_malformed_tool_attempt`)
 // ============================================================================
 
 fn find_ascii_xml_tag_ci(lower: &str, tag_prefix: &str) -> Option<usize> {
@@ -902,12 +907,12 @@ fn find_action_or_tool_header_offset(text: &str) -> Option<usize> {
     None
 }
 
-fn convert_option_b_object_to_tool_call(
+fn convert_json_action_object_to_tool_call(
     mut map: Map<String, Value>,
     step_idx: usize,
 ) -> Option<Result<WireToolCall, String>> {
     // CRITICAL COMPATIBILITY INVARIANT:
-    // Only classify a JSON object as an Option B action if it has a top-level `"action"` or `"tool"` key!
+    // Only classify a JSON object as a JSON action step if it has a top-level `"action"` or `"tool"` key!
     // Legacy proposal objects like `{"path": "src/math.rs", "edits": [...]}` MUST return `None`.
     let has_action_key = map.contains_key("action");
     let has_tool_key = map.contains_key("tool");
@@ -923,7 +928,7 @@ fn convert_option_b_object_to_tool_call(
         .map(str::to_string)
     else {
         return Some(Err(
-            "MALFORMED_STEP: Option B JSON object requires a non-empty string 'action' (or 'tool') key."
+            "MALFORMED_STEP: JSON action protocol object requires a non-empty string 'action' (or 'tool') key."
                 .to_string(),
         ));
     };
@@ -947,19 +952,19 @@ fn convert_option_b_object_to_tool_call(
                     }
                     Ok(_) => {
                         return Some(Err(format!(
-                            "MALFORMED_STEP: Option B '{nested_key}' string must decode to a JSON object."
+                            "MALFORMED_STEP: JSON action protocol '{nested_key}' string must decode to a JSON object."
                         )));
                     }
                     Err(e) => {
                         return Some(Err(format!(
-                            "MALFORMED_STEP: Option B '{nested_key}' failed JSON decoding: {e}"
+                            "MALFORMED_STEP: JSON action protocol '{nested_key}' failed JSON decoding: {e}"
                         )));
                     }
                 },
                 Value::Null => {}
                 _ => {
                     return Some(Err(format!(
-                        "MALFORMED_STEP: Option B '{nested_key}' must be a JSON object."
+                        "MALFORMED_STEP: JSON action protocol '{nested_key}' must be a JSON object."
                     )));
                 }
             }
@@ -1004,10 +1009,10 @@ fn convert_option_b_object_to_tool_call(
 /// into `Option<Result<WireToolCall, String>>`.
 ///
 /// ### Critical Compatibility Invariant
-/// Only classifies a JSON object as an Option B action when it contains a top-level `"action"` or
+/// Only classifies a JSON object as a JSON action step when it contains a top-level `"action"` or
 /// `"tool"` key. Legacy proposal payloads such as
 /// `{"path": "src/math.rs", "edits": [{"old_text": "...", "new_text": "..."}]}` return `None`.
-pub fn parse_option_b_json_action(
+pub fn parse_json_action_step(
     content: &str,
     step_idx: usize,
 ) -> Option<Result<WireToolCall, String>> {
@@ -1041,7 +1046,7 @@ pub fn parse_option_b_json_action(
     for cand in &candidates {
         match serde_json::from_str::<Value>(cand) {
             Ok(Value::Object(map)) => {
-                if let Some(res) = convert_option_b_object_to_tool_call(map, step_idx) {
+                if let Some(res) = convert_json_action_object_to_tool_call(map, step_idx) {
                     return Some(res);
                 }
             }
@@ -1051,7 +1056,7 @@ pub fn parse_option_b_json_action(
                     && saw_broken_action_json.is_none()
                 {
                     saw_broken_action_json = Some(format!(
-                        "MALFORMED_STEP: Broken Option B JSON action syntax: {parse_err}"
+                        "MALFORMED_STEP: Broken JSON action protocol syntax: {parse_err}"
                     ));
                 }
             }
@@ -2114,16 +2119,16 @@ pub fn parse_delegation_result_meta(output: &str) -> Option<DelegationResultMeta
 }
 
 // ============================================================================
-// Handoff Directive & Sticky Fallback Prompt Builders (Option A & Option B)
+// Handoff Directive & Sticky Fallback Prompt Builders
 // ============================================================================
 
-/// Builds the role directive for **Option A** (streaming native OpenAI `tool_calls`) for the
-/// autonomous coding subagent.
-pub fn build_option_a_handoff_directive(max_steps: usize) -> String {
+/// Builds the role directive for the native tool-call protocol (streaming native OpenAI `tool_calls`)
+/// for the autonomous coding subagent.
+pub fn build_native_protocol_handoff_directive(max_steps: usize) -> String {
     let clamped_steps = max_steps.clamp(1, MAX_DELEGATION_MAX_STEPS);
     format!(
         "You are operating as an autonomous multi-step coding subagent \
-         (Option A: native tool-call protocol, budget: up to {clamped_steps} steps).\n\
+         (native tool-call protocol, budget: up to {clamped_steps} steps).\n\
          Use native tool calls (`read_file`, `grep`, `find_path`, `edit_file`, `write_file`, \
          `create_directory`) to inspect code and apply changes.\n\
          Rules:\n\
@@ -2135,13 +2140,13 @@ pub fn build_option_a_handoff_directive(max_steps: usize) -> String {
     )
 }
 
-/// Builds the role directive for **Option B** (single JSON action object per turn) for the
-/// autonomous coding subagent.
-pub fn build_option_b_handoff_directive(max_steps: usize) -> String {
+/// Builds the role directive for the JSON action protocol (single JSON action object per turn)
+/// for the autonomous coding subagent.
+pub fn build_json_protocol_handoff_directive(max_steps: usize) -> String {
     let clamped_steps = max_steps.clamp(1, MAX_DELEGATION_MAX_STEPS);
     format!(
         "You are operating as an autonomous multi-step coding subagent \
-         (Option B: JSON action protocol, budget: up to {clamped_steps} steps).\n\
+         (JSON action protocol, budget: up to {clamped_steps} steps).\n\
          Allowed actions (exact 9-tool subset): `read_file`, `grep`, `find_path`, `outline_symbols`, \
          `get_symbol_body`, `edit_file`, `write_file`, `create_directory`, `finish`.\n\
          Rules:\n\
@@ -2162,11 +2167,11 @@ pub fn build_option_b_handoff_directive(max_steps: usize) -> String {
 }
 
 /// Builds the corrective prompt injected when [`ProtocolFallbackTracker`] switches stickily from
-/// Option A (`Native`) to Option B (`Json`) mid-delegation.
+/// the native tool-call protocol (`Native`) to the JSON action protocol (`Json`) mid-delegation.
 pub fn build_sticky_fallback_switch_prompt(reason: &str) -> String {
     let clean_reason = reason.trim();
     format!(
-        "[PROTOCOL SWITCH -> OPTION B JSON ACTION MODE]\n\
+        "[PROTOCOL SWITCH -> JSON ACTION MODE]\n\
          Native tool-call parsing failed ({clean_reason}). For all remaining steps of this delegation, \
          do NOT emit native tool calls or `<tool_call>` XML tags.\n\
          Reply with ONLY a single valid JSON object with a top-level `\"action\"` key chosen from \
@@ -2249,7 +2254,7 @@ mod tests {
     }
 
     #[test]
-    fn test_delegation_mode_from_args_and_instruction_including_test8_compat() {
+    fn test_delegation_mode_from_args_and_instruction_with_proposal_compat() {
         // Default when mode omitted and normal coding instruction -> Auto
         assert_eq!(
             DelegationMode::from_args_and_instruction(
@@ -2453,20 +2458,20 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_option_b_json_action_and_legacy_proposal_invariant() {
+    fn test_parse_json_action_step_and_legacy_proposal_invariant() {
         // 1. CRITICAL INVARIANT: Legacy proposal JSON (without top-level "action"/"tool") MUST return None!
         let legacy_proposal = r#"{"path": "src/math.rs", "edits": [{"old_text": "return 1;", "new_text": "return 2;"}]}"#;
-        assert!(parse_option_b_json_action(legacy_proposal, 0).is_none());
+        assert!(parse_json_action_step(legacy_proposal, 0).is_none());
         assert!(!contains_malformed_tool_attempt(legacy_proposal));
 
         // Even if legacy proposal's code string mentions `{"action": ...}`, outer JSON has no top-level `action`!
         let legacy_mentioning_action = r#"{"path": "src/router.rs", "edits": [{"old_text": "// {\"action\": \"ping\"}", "new_text": "// {\"action\": \"pong\"}"}]}"#;
-        assert!(parse_option_b_json_action(legacy_mentioning_action, 0).is_none());
+        assert!(parse_json_action_step(legacy_mentioning_action, 0).is_none());
         assert!(!contains_malformed_tool_attempt(legacy_mentioning_action));
 
         // 2. `<think>...</think>` + markdown ```json fence + flat params + multibyte UTF-8
         let fenced_with_think = "<think>\nLet's check 🚀 日本語 symbols & {\"edits\": []}\n</think>\n```json\n{\n  \"action\": \"edit_file\",\n  \"path\": \"src/lib.rs\",\n  \"old_text\": \"const MSG: &str = \\\"hello\\\";\",\n  \"new_text\": \"const MSG: &str = \\\"🚀 日本語 ∀x ∈ ℝ\\\";\"\n}\n```";
-        let parsed = parse_option_b_json_action(fenced_with_think, 3)
+        let parsed = parse_json_action_step(fenced_with_think, 3)
             .expect("expected Some")
             .expect("expected Ok WireToolCall");
         assert_eq!(parsed.id, "sub_json_3");
@@ -2478,7 +2483,7 @@ mod tests {
 
         // 3. Nested `arguments` and `tool` + `args`
         let nested_args = r#"{"action": "get_symbol_body", "arguments": {"path": "src/tools.rs", "symbol_name": "resolve_workspace_path"}}"#;
-        let tc_nested = parse_option_b_json_action(nested_args, 1)
+        let tc_nested = parse_json_action_step(nested_args, 1)
             .unwrap()
             .unwrap();
         assert_eq!(tc_nested.id, "sub_json_1");
@@ -2487,18 +2492,18 @@ mod tests {
         assert_eq!(nested_val["symbol"], "resolve_workspace_path");
 
         let tool_alias = r#"{"tool": "read_file", "args": {"path": "Cargo.toml", "start_line": 1, "end_line": 20}}"#;
-        let tc_alias = parse_option_b_json_action(tool_alias, 2).unwrap().unwrap();
+        let tc_alias = parse_json_action_step(tool_alias, 2).unwrap().unwrap();
         assert_eq!(tc_alias.function.name, "read_file");
 
-        // 4. Disallowed tool or missing required fields in Option B -> Some(Err(...))
+        // 4. Disallowed tool or missing required fields in JSON action protocol -> Some(Err(...))
         let disallowed = r#"{"action": "terminal", "command": "cargo test"}"#;
-        let err_disallowed = parse_option_b_json_action(disallowed, 4)
+        let err_disallowed = parse_json_action_step(disallowed, 4)
             .unwrap()
             .unwrap_err();
         assert!(err_disallowed.starts_with("PERMISSION_DENIED:"));
 
         let missing_field = r#"{"action": "read_file"}"#;
-        let err_missing = parse_option_b_json_action(missing_field, 5)
+        let err_missing = parse_json_action_step(missing_field, 5)
             .unwrap()
             .unwrap_err();
         assert!(err_missing.starts_with("MALFORMED_STEP:"));
@@ -2513,7 +2518,7 @@ mod tests {
         assert!(contains_malformed_tool_attempt(
             "{\"action\": \"edit_file\", \"path\": \"src/lib.rs\""
         ));
-        assert!(parse_option_b_json_action(
+        assert!(parse_json_action_step(
             "{\"action\": \"edit_file\", \"path\": \"src/lib.rs\"",
             6
         )
@@ -2539,7 +2544,7 @@ mod tests {
         assert_eq!(tracker.consecutive_malformed, 0);
         assert_eq!(tracker.total_malformed, 0);
 
-        // 2. Two consecutive malformed steps trigger sticky switch to Option B (`switched_now == true`)
+        // 2. Two consecutive malformed steps trigger sticky switch to JSON action protocol (`switched_now == true`)
         let mut tracker2 = ProtocolFallbackTracker::new(SubagentProtocol::Native, None);
         assert!(!tracker2.on_malformed_native_step());
         assert_eq!(tracker2.consecutive_malformed, 1);
@@ -2574,7 +2579,7 @@ mod tests {
     fn test_protocol_fallback_tracker_interleaved_malformed_triggers_fallback_in_auto_mode() {
         // Interleaved `[malformed, valid_step, malformed]` (e.g., unclosed `<tool_call>` at step 2,
         // trivial `create_directory` success at step 3, unclosed `<tool_call>` at step 4) MUST
-        // trigger sticky Option B JSON fallback via `total_malformed >= 2` in `auto` mode.
+        // trigger sticky JSON action protocol fallback via `total_malformed >= 2` in `auto` mode.
         let mut tracker = ProtocolFallbackTracker::new(SubagentProtocol::Auto, None);
         assert_eq!(tracker.active, ActiveStepProtocol::Native);
 
@@ -2592,7 +2597,7 @@ mod tests {
         assert_eq!(tracker.active, ActiveStepProtocol::Native);
         assert!(!tracker.fallback_triggered);
 
-        // Malformed #2 -> total_malformed reaches 2 -> sticky switch to Option B (`Json`)
+        // Malformed #2 -> total_malformed reaches 2 -> sticky switch to JSON action protocol (`Json`)
         assert!(tracker.on_malformed_native_step());
         assert_eq!(tracker.consecutive_malformed, 1);
         assert_eq!(tracker.total_malformed, 2);
@@ -2789,9 +2794,12 @@ mod tests {
         assert_eq!(parse_delegation_result_meta(&invalid_prefix), None);
 
         // Prompt builders sanity check
-        assert!(build_option_a_handoff_directive(12).contains("Option A"));
-        assert!(build_option_b_handoff_directive(12).contains("Option B"));
-        assert!(build_sticky_fallback_switch_prompt("bad args").contains("OPTION B"));
+        assert!(build_native_protocol_handoff_directive(12).contains("native tool-call protocol"));
+        assert!(build_json_protocol_handoff_directive(12).contains("JSON action protocol"));
+        assert!(
+            build_sticky_fallback_switch_prompt("bad args")
+                .contains("[PROTOCOL SWITCH -> JSON ACTION MODE]")
+        );
 
         let _ = fs::remove_dir_all(&ws);
     }
@@ -3045,12 +3053,12 @@ mod tests {
         assert!(!found.contains(".ssh"), "{found}");
         assert!(!found.contains(".aws"), "{found}");
 
-        // 5. Option A handoff directive aligns with native tool schema
-        let opt_a = build_option_a_handoff_directive(12);
-        assert!(opt_a.contains("read_file") && opt_a.contains("create_directory"));
-        assert!(opt_a.contains("Gatekeeper Critic"));
-        assert!(opt_a.contains("stop calling tools and reply directly"));
-        assert!(!opt_a.contains("invoke `finish("));
+        // 5. Native protocol handoff directive aligns with native tool schema
+        let native_dir = build_native_protocol_handoff_directive(12);
+        assert!(native_dir.contains("read_file") && native_dir.contains("create_directory"));
+        assert!(native_dir.contains("Gatekeeper Critic"));
+        assert!(native_dir.contains("stop calling tools and reply directly"));
+        assert!(!native_dir.contains("invoke `finish("));
         assert!(SUBAGENT_ALLOWED_TOOLS.contains(&"finish"));
 
         let _ = fs::remove_dir_all(&ws);

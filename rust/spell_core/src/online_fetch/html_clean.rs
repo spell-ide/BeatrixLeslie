@@ -864,16 +864,22 @@ fn decode_html_entities_impl(raw: &str) -> String {
     while i < len {
         if bytes[i] == b'&' {
             let max_scan = (i + 32).min(len);
-            if let Some(rel_semi) = raw[i + 1..max_scan].find(';') {
-                let entity = &raw[i + 1..i + 1 + rel_semi];
-                if let Some(decoded) = resolve_single_entity(entity) {
-                    out.push_str(&decoded);
-                    i += 1 + rel_semi + 1;
-                    continue;
+            if let Some(rel_semi) = bytes[i + 1..max_scan].iter().position(|&b| b == b';') {
+                let candidate = &bytes[i + 1..i + 1 + rel_semi];
+                if !candidate.is_empty() && candidate.iter().all(|b| b.is_ascii_graphic()) {
+                    if let Ok(entity) = std::str::from_utf8(candidate) {
+                        if let Some(decoded) = resolve_single_entity(entity) {
+                            out.push_str(&decoded);
+                            i += 1 + rel_semi + 1;
+                            continue;
+                        }
+                    }
                 }
             }
         }
-        let ch = raw[i..].chars().next().unwrap();
+        let Some(ch) = raw[i..].chars().next() else {
+            break;
+        };
         out.push(ch);
         i += ch.len_utf8();
     }
@@ -3673,5 +3679,17 @@ fn main() {}
         assert!(doc.markdown.contains("For α ≤ β → ∞ and Δ ≥ ∞, cost is O(n × log n)."));
         assert!(doc.markdown.contains("SafeAnchorText"));
         assert!(!doc.markdown.contains("javascript:"));
+    }
+
+    #[test]
+    fn test_html_entities_multibyte_utf8_after_ampersand_never_panics() {
+        let payload = format!("&{}", "é".repeat(25));
+        assert_eq!(decode_html_entities_preserving_tex_amps(&payload), payload);
+
+        let html = format!("<html><body><article><p>{payload} &amp; ok</p></article></body></html>");
+        let doc = extract_clean_markdown_and_toc(html.as_bytes(), "https://example.com/utf8")
+            .expect("multibyte UTF-8 after ampersand must not panic");
+        assert!(doc.markdown.contains(&payload));
+        assert!(doc.markdown.contains("& ok"));
     }
 }

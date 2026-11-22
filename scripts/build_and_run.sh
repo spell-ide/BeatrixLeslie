@@ -5,10 +5,16 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 BUILD_DIR="build"
 BUILD_TYPE="Release"
+TARGET_ARCH=""
+STRICT_WARNINGS=0
+NO_WERROR=0
 RUN_TESTS=0
 VERIFY_LOADER=0
 DEPLOY_QT=0
 INSTALL_PREFIX=""
+APPIMAGE_OUTPUT=""
+CODESIGN_IDENTITY="${SPELL_CODESIGN_IDENTITY:--}"
+NOTARIZE_PROFILE="${SPELL_NOTARIZE_PROFILE:-}"
 RUN_APP=0
 RUN_ARGS=()
 
@@ -16,19 +22,25 @@ usage() {
     cat <<'EOF'
 Usage: scripts/build_and_run.sh [options] [-- <app-args...>]
 
-Build, test, bundle Qt frameworks, verify dynamic loader paths, install, and launch BeatrixLeslie IDE.
+Build, test, bundle Qt runtimes, sign, verify dynamic loader paths, package, and launch BeatrixLeslie IDE.
 
 Options:
-  --build-dir <dir>     CMake build directory (default: build)
-  --build-type <type>   CMake build configuration: Release, Debug, RelWithDebInfo (default: Release)
-  --debug               Shorthand for --build-type Debug
-  --release             Shorthand for --build-type Release
-  --test                Run Rust unit tests (ephemeral keyring) and CTest Qt tests
-  --deploy-qt           Bundle Qt frameworks, plugins, and QScintilla2 into a self-contained macOS .app
-  --verify-loader       Verify dynamic library loader paths (otool -L / codesign on macOS, ldd on Linux)
-  --install <prefix>    Install portable application layout into <prefix>
-  --run                 Launch the built BeatrixLeslieIDE executable
-  -h, --help            Show this help message and exit
+  --build-dir <dir>            CMake build directory (default: build)
+  --build-type <type>          CMake build configuration: Release, Debug, RelWithDebInfo (default: Release)
+  --debug                      Shorthand for --build-type Debug
+  --release                    Shorthand for --build-type Release
+  --arch <arch>                macOS target architecture: arm64, x86_64, or universal2
+  --strict-warnings            Enforce C++ -Werror and Rust -D warnings
+  --no-werror                  Disable C++ warnings-as-errors (-DSPELL_WARNINGS_AS_ERRORS=OFF)
+  --test                       Run Rust unit tests (ephemeral keyring) and CTest Qt tests
+  --deploy-qt                  Bundle self-contained Qt & QScintilla2 runtime (macOS .app or Linux --install prefix)
+  --package-appimage <path>    Package deployed Linux prefix into a self-contained x86_64 AppImage
+  --codesign-identity <id>     macOS codesign identity (default: $SPELL_CODESIGN_IDENTITY or '-' ad-hoc)
+  --notarize-profile <name>    macOS notarytool keychain profile (default: $SPELL_NOTARIZE_PROFILE)
+  --verify-loader              Verify dynamic library loader paths, RPATHs, and headless startup
+  --install <prefix>           Install portable application layout into <prefix>
+  --run                        Launch the built BeatrixLeslieIDE executable
+  -h, --help                   Show this help message and exit
 EOF
 }
 
@@ -69,6 +81,24 @@ while [[ $# -gt 0 ]]; do
             BUILD_TYPE="Release"
             shift
             ;;
+        --arch)
+            if [[ $# -lt 2 ]]; then
+                echo "Error: --arch requires arm64, x86_64, or universal2." >&2
+                exit 1
+            fi
+            TARGET_ARCH="$2"
+            shift 2
+            ;;
+        --strict-warnings)
+            STRICT_WARNINGS=1
+            NO_WERROR=0
+            shift
+            ;;
+        --no-werror)
+            NO_WERROR=1
+            STRICT_WARNINGS=0
+            shift
+            ;;
         --test)
             RUN_TESTS=1
             shift
@@ -76,6 +106,31 @@ while [[ $# -gt 0 ]]; do
         --deploy-qt)
             DEPLOY_QT=1
             shift
+            ;;
+        --package-appimage)
+            if [[ $# -lt 2 ]]; then
+                echo "Error: --package-appimage requires an output .AppImage path." >&2
+                exit 1
+            fi
+            APPIMAGE_OUTPUT="$2"
+            DEPLOY_QT=1
+            shift 2
+            ;;
+        --codesign-identity)
+            if [[ $# -lt 2 ]]; then
+                echo "Error: --codesign-identity requires an identity argument." >&2
+                exit 1
+            fi
+            CODESIGN_IDENTITY="$2"
+            shift 2
+            ;;
+        --notarize-profile)
+            if [[ $# -lt 2 ]]; then
+                echo "Error: --notarize-profile requires a keychain profile argument." >&2
+                exit 1
+            fi
+            NOTARIZE_PROFILE="$2"
+            shift 2
             ;;
         --verify-loader)
             VERIFY_LOADER=1
@@ -114,6 +169,67 @@ done
 RESOLVED_BUILD_DIR="$(resolve_path "${BUILD_DIR}")"
 OS_NAME="$(uname -s)"
 
+if [[ -n "${TARGET_ARCH}" ]]; then
+    if [[ "${OS_NAME}" != "Darwin" ]]; then
+        echo "Error: --arch is only supported on macOS (detected: ${OS_NAME})." >&2
+        exit 1
+    fi
+    case "${TARGET_ARCH}" in
+        arm64|x86_64|universal2)
+            ;;
+        *)
+            echo "Error: Unsupported --arch '${TARGET_ARCH}' (expected arm64, x86_64, or universal2)." >&2
+            exit 1
+            ;;
+    esac
+fi
+
+if [[ -n "${APPIMAGE_OUTPUT}" && "${OS_NAME}" != "Linux" ]]; then
+    echo "Error: --package-appimage is only supported on Linux (detected: ${OS_NAME})." >&2
+    exit 1
+fi
+
+if [[ "${OS_NAME}" == "Linux" && "${DEPLOY_QT}" -eq 1 && -z "${INSTALL_PREFIX}" ]]; then
+    echo "Error: --deploy-qt (and --package-appimage) on Linux requires --install <prefix>." >&2
+    exit 1
+fi
+
+# Return prioritized Homebrew root prefixes on macOS (honoring `brew --prefix` and `--arch`).
+macos_brew_roots() {
+    local brew_pref=""
+    if command -v brew >/dev/null 2>&1; then
+        brew_pref="$(brew --prefix 2>/dev/null || true)"
+    fi
+
+    local candidates=()
+    if [[ "${TARGET_ARCH}" == "x86_64" ]]; then
+        [[ "${brew_pref}" == /usr/local* ]] && candidates+=("${brew_pref}")
+        candidates+=("/usr/local" "/opt/homebrew")
+        [[ -n "${brew_pref}" ]] && candidates+=("${brew_pref}")
+    elif [[ "${TARGET_ARCH}" == "arm64" ]]; then
+        [[ "${brew_pref}" == /opt/homebrew* ]] && candidates+=("${brew_pref}")
+        candidates+=("/opt/homebrew" "/usr/local")
+        [[ -n "${brew_pref}" ]] && candidates+=("${brew_pref}")
+    else
+        [[ -n "${brew_pref}" ]] && candidates+=("${brew_pref}")
+        if [[ "$(uname -m)" == "x86_64" ]]; then
+            candidates+=("/usr/local" "/opt/homebrew")
+        else
+            candidates+=("/opt/homebrew" "/usr/local")
+        fi
+    fi
+
+    local seen="|"
+    local root
+    for root in "${candidates[@]}"; do
+        [[ -n "${root}" && -d "${root}" ]] || continue
+        if [[ "${seen}" != *"|${root}|"* ]]; then
+            seen="${seen}${root}|"
+            printf '%s\n' "${root}"
+        fi
+    done
+}
+
 detect_parallel_jobs() {
     local cpus=4
     if command -v nproc >/dev/null 2>&1; then
@@ -145,19 +261,83 @@ detect_parallel_jobs() {
 
 PARALLEL_JOBS="$(detect_parallel_jobs)"
 
-echo "==> Configuring BeatrixLeslie IDE (${BUILD_TYPE}) in ${RESOLVED_BUILD_DIR}"
-cmake -S "${ROOT_DIR}" -B "${RESOLVED_BUILD_DIR}" \
-    -DCMAKE_BUILD_TYPE="${BUILD_TYPE}" \
+CMAKE_ARGS=(
+    -S "${ROOT_DIR}"
+    -B "${RESOLVED_BUILD_DIR}"
+    -DCMAKE_BUILD_TYPE="${BUILD_TYPE}"
     -DSPELL_BUILD_RUST=ON
+)
+
+if [[ "${NO_WERROR}" -eq 1 ]]; then
+    CMAKE_ARGS+=(-DSPELL_WARNINGS_AS_ERRORS=OFF)
+else
+    CMAKE_ARGS+=(-DSPELL_WARNINGS_AS_ERRORS=ON)
+fi
+
+if [[ "${OS_NAME}" == "Darwin" ]]; then
+    case "${TARGET_ARCH}" in
+        arm64)
+            CMAKE_ARGS+=(-DCMAKE_OSX_ARCHITECTURES=arm64)
+            ;;
+        x86_64)
+            CMAKE_ARGS+=(-DCMAKE_OSX_ARCHITECTURES=x86_64)
+            ;;
+        universal2)
+            CMAKE_ARGS+=("-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64")
+            ;;
+    esac
+
+    MACOS_PREFIX_ENTRIES=()
+    if [[ -n "${CMAKE_PREFIX_PATH:-}" ]]; then
+        MACOS_PREFIX_ENTRIES+=("${CMAKE_PREFIX_PATH}")
+    fi
+    while IFS= read -r brew_root; do
+        [[ -z "${brew_root}" ]] && continue
+        for formula in qtbase qtsvg qscintilla2 qt; do
+            if [[ -d "${brew_root}/opt/${formula}" ]]; then
+                MACOS_PREFIX_ENTRIES+=("${brew_root}/opt/${formula}")
+            fi
+        done
+    done < <(macos_brew_roots)
+
+    if [[ ${#MACOS_PREFIX_ENTRIES[@]} -gt 0 ]]; then
+        JOINED_PREFIX_PATH="$(IFS=';'; printf '%s' "${MACOS_PREFIX_ENTRIES[*]}")"
+        CMAKE_ARGS+=("-DCMAKE_PREFIX_PATH=${JOINED_PREFIX_PATH}")
+    fi
+fi
+
+if [[ "${STRICT_WARNINGS}" -eq 1 ]]; then
+    if [[ -n "${RUSTFLAGS:-}" ]]; then
+        export RUSTFLAGS="${RUSTFLAGS} -D warnings"
+    else
+        export RUSTFLAGS="-D warnings"
+    fi
+    echo "==> Strict warnings enabled (SPELL_WARNINGS_AS_ERRORS=ON, RUSTFLAGS='${RUSTFLAGS}')"
+fi
+
+echo "==> Configuring BeatrixLeslie IDE (${BUILD_TYPE}) in ${RESOLVED_BUILD_DIR}"
+cmake "${CMAKE_ARGS[@]}"
 
 echo "==> Building BeatrixLeslie IDE (parallel jobs: ${PARALLEL_JOBS})"
 cmake --build "${RESOLVED_BUILD_DIR}" --config "${BUILD_TYPE}" --parallel "${PARALLEL_JOBS}"
 
 if [[ "${RUN_TESTS}" -eq 1 ]]; then
     echo "==> Running spell_core Rust tests (SPELL_EPHEMERAL_KEYRING=1)"
-    SPELL_EPHEMERAL_KEYRING=1 cargo test \
-        --manifest-path "${ROOT_DIR}/rust/spell_core/Cargo.toml" \
+    CARGO_TEST_ARGS=(
+        --manifest-path "${ROOT_DIR}/rust/spell_core/Cargo.toml"
         --target-dir "${ROOT_DIR}/rust/spell_core/target"
+    )
+    if [[ "${OS_NAME}" == "Darwin" ]]; then
+        case "${TARGET_ARCH}" in
+            arm64)
+                CARGO_TEST_ARGS+=(--target aarch64-apple-darwin)
+                ;;
+            x86_64)
+                CARGO_TEST_ARGS+=(--target x86_64-apple-darwin)
+                ;;
+        esac
+    fi
+    SPELL_EPHEMERAL_KEYRING=1 cargo test "${CARGO_TEST_ARGS[@]}"
 
     echo "==> Running SpellQtTests via CTest"
     ctest --test-dir "${RESOLVED_BUILD_DIR}" --build-config "${BUILD_TYPE}" --output-on-failure
@@ -171,28 +351,24 @@ if [[ -n "${INSTALL_PREFIX}" ]]; then
 fi
 
 find_macdeployqt() {
-    local candidate
+    local brew_root candidate
+    while IFS= read -r brew_root; do
+        [[ -z "${brew_root}" ]] && continue
+        for search_dir in "${brew_root}/opt/qtbase/bin" "${brew_root}/opt/qt/bin" "${brew_root}/bin"; do
+            for candidate in macdeployqt macdeployqt6; do
+                if [[ -x "${search_dir}/${candidate}" ]]; then
+                    printf '%s\n' "${search_dir}/${candidate}"
+                    return 0
+                fi
+            done
+        done
+    done < <(macos_brew_roots)
+
     for candidate in macdeployqt macdeployqt6; do
         if command -v "${candidate}" >/dev/null 2>&1; then
             command -v "${candidate}"
             return 0
         fi
-    done
-
-    local search_dir
-    for search_dir in \
-        "/opt/homebrew/opt/qtbase/bin" \
-        "/opt/homebrew/opt/qt/bin" \
-        "/opt/homebrew/bin" \
-        "/usr/local/opt/qtbase/bin" \
-        "/usr/local/opt/qt/bin" \
-        "/usr/local/bin"; do
-        for candidate in macdeployqt macdeployqt6; do
-            if [[ -x "${search_dir}/${candidate}" ]]; then
-                printf '%s\n' "${search_dir}/${candidate}"
-                return 0
-            fi
-        done
     done
 
     return 1
@@ -208,9 +384,14 @@ deploy_macos_bundle() {
         exit 1
     fi
 
+    if [[ -n "${NOTARIZE_PROFILE}" && "${CODESIGN_IDENTITY}" == "-" ]]; then
+        echo "Error: --notarize-profile requires a Developer ID --codesign-identity (ad-hoc '-' cannot be notarized)." >&2
+        exit 1
+    fi
+
     local macdeployqt_bin=""
     if ! macdeployqt_bin="$(find_macdeployqt)"; then
-        echo "Error: macdeployqt / macdeployqt6 not found in PATH or standard Homebrew prefixes." >&2
+        echo "Error: macdeployqt / macdeployqt6 not found in PATH or Homebrew prefixes." >&2
         exit 1
     fi
 
@@ -243,17 +424,16 @@ deploy_macos_bundle() {
                 ;;
         esac
         if [[ -z "${qsci_src}" ]]; then
-            local cand_dir
-            for cand_dir in \
-                "/opt/homebrew/opt/qscintilla2/lib" \
-                "/usr/local/opt/qscintilla2/lib" \
-                "/opt/homebrew/lib" \
-                "/usr/local/lib"; do
-                if [[ -e "${cand_dir}/${qsci_base}" ]]; then
-                    qsci_src="${cand_dir}/${qsci_base}"
-                    break
-                fi
-            done
+            local brew_root cand_dir
+            while IFS= read -r brew_root; do
+                [[ -z "${brew_root}" ]] && continue
+                for cand_dir in "${brew_root}/opt/qscintilla2/lib" "${brew_root}/lib"; do
+                    if [[ -e "${cand_dir}/${qsci_base}" ]]; then
+                        qsci_src="${cand_dir}/${qsci_base}"
+                        break 2
+                    fi
+                done
+            done < <(macos_brew_roots)
         fi
         if [[ -z "${qsci_src}" || ! -e "${qsci_src}" ]]; then
             echo "Error: QScintilla2 dylib '${qsci_dep}' referenced by ${app_bin} could not be located" >&2
@@ -270,18 +450,18 @@ deploy_macos_bundle() {
 
     # 2. Run macdeployqt to bundle QtCore, QtGui, QtWidgets, QtSvg, and required PlugIns.
     local libpath_args=()
-    local qt_lib_dir
-    for qt_lib_dir in \
-        "/opt/homebrew/opt/qtbase/lib" \
-        "/opt/homebrew/opt/qtsvg/lib" \
-        "/opt/homebrew/lib" \
-        "/usr/local/opt/qtbase/lib" \
-        "/usr/local/opt/qtsvg/lib" \
-        "/usr/local/lib"; do
-        if [[ -d "${qt_lib_dir}" ]]; then
-            libpath_args+=("-libpath=${qt_lib_dir}")
-        fi
-    done
+    local brew_root qt_lib_dir
+    while IFS= read -r brew_root; do
+        [[ -z "${brew_root}" ]] && continue
+        for qt_lib_dir in \
+            "${brew_root}/opt/qtbase/lib" \
+            "${brew_root}/opt/qtsvg/lib" \
+            "${brew_root}/lib"; do
+            if [[ -d "${qt_lib_dir}" ]]; then
+                libpath_args+=("-libpath=${qt_lib_dir}")
+            fi
+        done
+    done < <(macos_brew_roots)
 
     echo "==> Running ${macdeployqt_bin} on ${bundle_dir}"
     if [[ ${#libpath_args[@]} -gt 0 ]]; then
@@ -362,26 +542,464 @@ deploy_macos_bundle() {
         done
     fi
 
-    # 4. Inside-out ad-hoc codesigning and strict signature verification.
-    echo "==> Applying inside-out ad-hoc code signatures to ${bundle_dir}"
-    local dylib
-    for dylib in "${frameworks_dir}/"*.dylib; do
-        [[ -f "${dylib}" && ! -L "${dylib}" ]] || continue
-        codesign --force --sign - "${dylib}"
-    done
-    local fw
-    for fw in "${frameworks_dir}/"*.framework; do
-        [[ -d "${fw}" && ! -L "${fw}" ]] || continue
-        codesign --force --sign - "${fw}"
-    done
-    local plugin
-    for plugin in "${bundle_dir}/Contents/PlugIns/"*/*.dylib; do
-        [[ -f "${plugin}" && ! -L "${plugin}" ]] || continue
-        codesign --force --sign - "${plugin}"
-    done
-    codesign --force --sign - "${bundle_dir}"
+    # 4. Inside-out codesigning (ad-hoc '-' or Developer ID hardened runtime + timestamp).
+    if [[ "${CODESIGN_IDENTITY}" == "-" ]]; then
+        echo "==> Applying inside-out ad-hoc code signatures to ${bundle_dir}"
+        local dylib
+        for dylib in "${frameworks_dir}/"*.dylib; do
+            [[ -f "${dylib}" && ! -L "${dylib}" ]] || continue
+            codesign --force --sign - "${dylib}"
+        done
+        local plugin
+        for plugin in "${bundle_dir}/Contents/PlugIns/"*/*.dylib; do
+            [[ -f "${plugin}" && ! -L "${plugin}" ]] || continue
+            codesign --force --sign - "${plugin}"
+        done
+        local fw
+        for fw in "${frameworks_dir}/"*.framework; do
+            [[ -d "${fw}" && ! -L "${fw}" ]] || continue
+            codesign --force --sign - "${fw}"
+        done
+        codesign --force --sign - "${bundle_dir}"
+    else
+        echo "==> Signing ${bundle_dir} with Developer ID identity '${CODESIGN_IDENTITY}' (hardened runtime + timestamp)"
+        local nested_macho
+        for nested_macho in \
+            "${frameworks_dir}/"*.dylib \
+            "${bundle_dir}/Contents/PlugIns/"*/*.dylib; do
+            [[ -f "${nested_macho}" && ! -L "${nested_macho}" ]] || continue
+            if file -b "${nested_macho}" | grep -Fq "Mach-O"; then
+                codesign --force --options runtime --timestamp --sign "${CODESIGN_IDENTITY}" "${nested_macho}"
+            fi
+        done
+        local fw
+        for fw in "${frameworks_dir}/"*.framework; do
+            [[ -d "${fw}" && ! -L "${fw}" ]] || continue
+            codesign --force --options runtime --timestamp --sign "${CODESIGN_IDENTITY}" "${fw}"
+        done
+        codesign --force --options runtime --timestamp --sign "${CODESIGN_IDENTITY}" "${bundle_dir}"
+    fi
+
     codesign --verify --deep --strict "${bundle_dir}"
+
+    # 5. Optional Apple notarization & stapling when NOTARIZE_PROFILE is configured.
+    if [[ -n "${NOTARIZE_PROFILE}" ]]; then
+        echo "==> Submitting ${bundle_dir} for Apple notarization (profile: ${NOTARIZE_PROFILE})"
+        local notarize_tmp
+        notarize_tmp="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/spell-notarize.XXXXXX")"
+        local notarize_zip="${notarize_tmp}/BeatrixLeslieIDE-notarize.zip"
+        ditto -c -k --sequesterRsrc --keepParent "${bundle_dir}" "${notarize_zip}"
+        xcrun notarytool submit "${notarize_zip}" --keychain-profile "${NOTARIZE_PROFILE}" --wait
+        rm -rf "${notarize_tmp}"
+
+        echo "==> Stapling and validating notarization ticket on ${bundle_dir}"
+        xcrun stapler staple "${bundle_dir}"
+        xcrun stapler validate "${bundle_dir}"
+    fi
+
     echo "==> Self-contained macOS deployment completed for ${bundle_dir}"
+}
+
+find_linux_qt6_plugins_dir() {
+    local cand=""
+    if command -v qmake6 >/dev/null 2>&1; then
+        cand="$(qmake6 -query QT_INSTALL_PLUGINS 2>/dev/null || true)"
+        if [[ -n "${cand}" && -d "${cand}" ]]; then
+            printf '%s\n' "${cand}"
+            return 0
+        fi
+    fi
+    if command -v qtpaths6 >/dev/null 2>&1; then
+        cand="$(qtpaths6 --plugin-dir 2>/dev/null || true)"
+        if [[ -n "${cand}" && -d "${cand}" ]]; then
+            printf '%s\n' "${cand}"
+            return 0
+        fi
+    fi
+    if command -v qmake >/dev/null 2>&1; then
+        local qver
+        qver="$(qmake -query QT_VERSION 2>/dev/null || true)"
+        if [[ "${qver}" == 6.* ]]; then
+            cand="$(qmake -query QT_INSTALL_PLUGINS 2>/dev/null || true)"
+            if [[ -n "${cand}" && -d "${cand}" ]]; then
+                printf '%s\n' "${cand}"
+                return 0
+            fi
+        fi
+    fi
+
+    for cand in \
+        "/usr/lib/x86_64-linux-gnu/qt6/plugins" \
+        "/usr/lib/aarch64-linux-gnu/qt6/plugins" \
+        "/usr/lib64/qt6/plugins" \
+        "/usr/lib/qt6/plugins"; do
+        if [[ -d "${cand}" ]]; then
+            printf '%s\n' "${cand}"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+find_linux_qt6_lib_dir() {
+    local cand=""
+    if command -v qmake6 >/dev/null 2>&1; then
+        cand="$(qmake6 -query QT_INSTALL_LIBS 2>/dev/null || true)"
+        if [[ -n "${cand}" && -d "${cand}" ]]; then
+            printf '%s\n' "${cand}"
+            return 0
+        fi
+    fi
+    for cand in \
+        "/usr/lib/x86_64-linux-gnu" \
+        "/usr/lib/aarch64-linux-gnu" \
+        "/usr/lib64" \
+        "/usr/lib"; do
+        if [[ -d "${cand}" ]]; then
+            printf '%s\n' "${cand}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+is_excluded_linux_syslib() {
+    local libname="$1"
+    case "${libname}" in
+        linux-vdso.so*|ld-linux*|libc.so*|libm.so*|libdl.so*|librt.so*|libpthread.so*|libutil.so*|libresolv.so*|libnss_*.so*|\
+        libstdc++.so*|libgcc_s.so*|\
+        libGL*|libEGL*|libOpenGL*|libgbm.so*|libdrm.so*|libvulkan.so*|\
+        libwayland-client.so*|libwayland-cursor.so*|libwayland-egl.so*|libwayland-server.so*|\
+        libX11.so*|libX11-xcb.so*|libxcb.so*|\
+        libfontconfig.so*|libfreetype.so*|\
+        libdbus-1.so*|libsystemd.so*|libudev.so*|\
+        libz.so*|libexpat.so*|libglib-2.0.so*|libgio-2.0.so*|libgobject-2.0.so*|libgmodule-2.0.so*|libharfbuzz.so*)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+extract_linux_hicolor_icons() {
+    local prefix="$1"
+    local dir256="${prefix}/share/icons/hicolor/256x256/apps"
+    local dir512="${prefix}/share/icons/hicolor/512x512/apps"
+    local out256="${dir256}/com.spell.BeatrixLeslieIDE.png"
+    local out512="${dir512}/com.spell.BeatrixLeslieIDE.png"
+    local icns_src="${ROOT_DIR}/Resources/AppIcon.icns"
+    local fallback_png="${ROOT_DIR}/Resources/AppIconRounded.png"
+
+    mkdir -p "${dir256}" "${dir512}"
+
+    if command -v python3 >/dev/null 2>&1 && [[ -f "${icns_src}" ]]; then
+        python3 - "${icns_src}" "${fallback_png}" "${out256}" "${out512}" <<'PY'
+import shutil
+import struct
+import sys
+from pathlib import Path
+
+icns_path = Path(sys.argv[1])
+fallback_path = Path(sys.argv[2])
+out_256 = Path(sys.argv[3])
+out_512 = Path(sys.argv[4])
+
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+chunks = {}
+
+data = icns_path.read_bytes()
+if len(data) >= 8 and data[:4] == b"icns":
+    pos = 8
+    while pos + 8 <= len(data):
+        ostype = data[pos:pos + 4].decode("latin1", errors="ignore")
+        size = struct.unpack(">I", data[pos + 4:pos + 8])[0]
+        if size < 8 or pos + size > len(data):
+            break
+        payload = data[pos + 8:pos + size]
+        if payload.startswith(PNG_MAGIC):
+            chunks[ostype] = payload
+        pos += size
+
+for target_path, candidates in ((out_256, ("ic08", "ic13")), (out_512, ("ic09", "ic14"))):
+    written = False
+    for key in candidates:
+        if key in chunks:
+            target_path.write_bytes(chunks[key])
+            written = True
+            break
+    if not written:
+        shutil.copyfile(fallback_path, target_path)
+PY
+    else
+        cp -L "${fallback_png}" "${out256}"
+        cp -L "${fallback_png}" "${out512}"
+    fi
+}
+
+deploy_linux_bundle() {
+    local prefix="$1"
+    local app_bin="${prefix}/bin/BeatrixLeslieIDE"
+    local lib_dir="${prefix}/lib"
+    local plugins_dir="${prefix}/plugins"
+
+    if [[ ! -x "${app_bin}" ]]; then
+        echo "Error: Cannot deploy missing Linux executable ${app_bin}" >&2
+        exit 1
+    fi
+    if ! command -v patchelf >/dev/null 2>&1; then
+        echo "Error: 'patchelf' is required for --deploy-qt on Linux (e.g. sudo apt-get install patchelf)." >&2
+        exit 1
+    fi
+    if ! command -v file >/dev/null 2>&1; then
+        echo "Error: 'file' is required for --deploy-qt on Linux (e.g. sudo apt-get install file)." >&2
+        exit 1
+    fi
+
+    local qt_plugins_src=""
+    if ! qt_plugins_src="$(find_linux_qt6_plugins_dir)"; then
+        echo "Error: Could not locate Qt 6 plugins directory (install qt6-base-dev-tools or check qmake6)." >&2
+        exit 1
+    fi
+    local qt_lib_src=""
+    qt_lib_src="$(find_linux_qt6_lib_dir || true)"
+
+    echo "==> Deploying self-contained Linux Qt 6 & QScintilla2 runtime into ${prefix}"
+    echo "    Qt 6 plugins source: ${qt_plugins_src}"
+    mkdir -p "${prefix}/bin" "${lib_dir}" "${plugins_dir}"
+
+    # 1. Write qt.conf alongside bin/BeatrixLeslieIDE (zero LD_LIBRARY_PATH wrapper needed).
+    cat > "${prefix}/bin/qt.conf" <<'EOF'
+[Paths]
+Prefix = ..
+Plugins = plugins
+Libraries = lib
+EOF
+
+    # 2. Copy required Qt 6 plugin subdirectories (skipping libqgtk3.so).
+    mkdir -p "${plugins_dir}/platforms"
+    local plat_glob plat_file
+    for plat_glob in \
+        "${qt_plugins_src}/platforms/libqxcb.so" \
+        "${qt_plugins_src}/platforms/libqoffscreen.so" \
+        "${qt_plugins_src}/platforms/libqminimal.so" \
+        "${qt_plugins_src}/platforms/libqminimalegl.so" \
+        "${qt_plugins_src}/platforms/"libqwayland*.so; do
+        [[ -f "${plat_glob}" ]] || continue
+        cp -L "${plat_glob}" "${plugins_dir}/platforms/$(basename "${plat_glob}")"
+    done
+
+    local subdir so_src
+    for subdir in \
+        xcbglintegrations \
+        wayland-shell-integration \
+        wayland-graphics-integration-client \
+        wayland-decoration-client \
+        platforminputcontexts \
+        tls; do
+        if [[ -d "${qt_plugins_src}/${subdir}" ]]; then
+            mkdir -p "${plugins_dir}/${subdir}"
+            for so_src in "${qt_plugins_src}/${subdir}/"*.so; do
+                [[ -f "${so_src}" ]] || continue
+                case "$(basename "${so_src}")" in
+                    *gtk*) continue ;;
+                esac
+                cp -L "${so_src}" "${plugins_dir}/${subdir}/$(basename "${so_src}")"
+            done
+        fi
+    done
+
+    if [[ -d "${qt_plugins_src}/imageformats" ]]; then
+        mkdir -p "${plugins_dir}/imageformats"
+        local img_plugin
+        for img_plugin in libqsvg.so libqjpeg.so libqico.so libqgif.so; do
+            if [[ -f "${qt_plugins_src}/imageformats/${img_plugin}" ]]; then
+                cp -L "${qt_plugins_src}/imageformats/${img_plugin}" "${plugins_dir}/imageformats/${img_plugin}"
+            fi
+        done
+    fi
+
+    if [[ -f "${qt_plugins_src}/iconengines/libqsvgicon.so" ]]; then
+        mkdir -p "${plugins_dir}/iconengines"
+        cp -L "${qt_plugins_src}/iconengines/libqsvgicon.so" "${plugins_dir}/iconengines/libqsvgicon.so"
+    fi
+
+    if [[ -f "${qt_plugins_src}/platformthemes/libxdgdesktopportal.so" ]]; then
+        mkdir -p "${plugins_dir}/platformthemes"
+        cp -L "${qt_plugins_src}/platformthemes/libxdgdesktopportal.so" "${plugins_dir}/platformthemes/libxdgdesktopportal.so"
+    fi
+
+    if [[ ! -f "${plugins_dir}/platforms/libqxcb.so" || ! -f "${plugins_dir}/platforms/libqoffscreen.so" ]]; then
+        echo "Error: Missing required Qt platform plugins (libqxcb.so / libqoffscreen.so) in ${plugins_dir}/platforms" >&2
+        exit 1
+    fi
+
+    # 3. Recursively resolve shared library dependencies across BeatrixLeslieIDE, libspell_core.so,
+    #    and all bundled Qt plugins, copying non-host-ABI libraries into ${prefix}/lib/.
+    local bfs_queue=("${app_bin}")
+    local visited="|${app_bin}|"
+    if [[ -f "${lib_dir}/libspell_core.so" ]]; then
+        bfs_queue+=("${lib_dir}/libspell_core.so")
+        visited="${visited}${lib_dir}/libspell_core.so|"
+    fi
+    local plugin_so
+    for plugin_so in "${plugins_dir}/"*/*.so; do
+        [[ -f "${plugin_so}" ]] || continue
+        bfs_queue+=("${plugin_so}")
+        visited="${visited}${plugin_so}|"
+    done
+
+    local discovery_ld_path="${lib_dir}"
+    if [[ -n "${qt_lib_src}" ]]; then
+        discovery_ld_path="${discovery_ld_path}:${qt_lib_src}"
+    fi
+    if [[ -n "${QSCINTILLA_LIB_DIR:-}" && -d "${QSCINTILLA_LIB_DIR}" ]]; then
+        discovery_ld_path="${discovery_ld_path}:${QSCINTILLA_LIB_DIR}"
+    fi
+
+    local idx=0
+    while [[ "${idx}" -lt "${#bfs_queue[@]}" ]]; do
+        local current_elf="${bfs_queue[${idx}]}"
+        idx=$(( idx + 1 ))
+
+        local ldd_lines
+        ldd_lines="$(LD_LIBRARY_PATH="${discovery_ld_path}" ldd "${current_elf}" 2>/dev/null || true)"
+
+        local needed_list=""
+        if command -v readelf >/dev/null 2>&1; then
+            needed_list="$(readelf -d "${current_elf}" 2>/dev/null | sed -n 's/.*(NEEDED).*Shared library: \[\(.*\)\].*/\1/p' || true)"
+        else
+            needed_list="$(printf '%s\n' "${ldd_lines}" | awk '/=>/ {print $1}')"
+        fi
+
+        local soname
+        while IFS= read -r soname; do
+            [[ -z "${soname}" ]] && continue
+            if is_excluded_linux_syslib "${soname}"; then
+                continue
+            fi
+
+            local dest_lib="${lib_dir}/${soname}"
+            if [[ ! -f "${dest_lib}" ]]; then
+                local resolved_src=""
+                resolved_src="$(printf '%s\n' "${ldd_lines}" | awk -v target="${soname}" '$1 == target && $2 == "=>" && $3 ~ /^\// {print $3; exit}')"
+                if [[ -z "${resolved_src}" && -n "${qt_lib_src}" && -e "${qt_lib_src}/${soname}" ]]; then
+                    resolved_src="${qt_lib_src}/${soname}"
+                fi
+                if [[ -z "${resolved_src}" || ! -e "${resolved_src}" ]]; then
+                    echo "Error: Could not resolve required shared library '${soname}' needed by ${current_elf}" >&2
+                    exit 1
+                fi
+                cp -L "${resolved_src}" "${dest_lib}"
+                chmod 0755 "${dest_lib}"
+            fi
+
+            if [[ "${visited}" != *"|${dest_lib}|"* ]]; then
+                visited="${visited}${dest_lib}|"
+                bfs_queue+=("${dest_lib}")
+            fi
+        done <<<"${needed_list}"
+    done
+
+    # 4. Patch ELF RPATHs via patchelf so zero LD_LIBRARY_PATH wrapper is ever needed.
+    chmod u+w "${app_bin}"
+    patchelf --set-rpath '$ORIGIN:$ORIGIN/../lib' "${app_bin}"
+
+    local bundled_so
+    for bundled_so in "${lib_dir}/"*.so*; do
+        [[ -f "${bundled_so}" && ! -L "${bundled_so}" ]] || continue
+        if ! file -b "${bundled_so}" | grep -Fq "ELF"; then
+            continue
+        fi
+        if command -v readelf >/dev/null 2>&1; then
+            if ! readelf -d "${bundled_so}" 2>/dev/null | grep -Fq "(NEEDED)"; then
+                continue
+            fi
+        fi
+        chmod u+w "${bundled_so}"
+        patchelf --set-rpath '$ORIGIN' "${bundled_so}"
+    done
+
+    for plugin_so in "${plugins_dir}/"*/*.so; do
+        [[ -f "${plugin_so}" && ! -L "${plugin_so}" ]] || continue
+        if ! file -b "${plugin_so}" | grep -Fq "ELF"; then
+            continue
+        fi
+        chmod u+w "${plugin_so}"
+        patchelf --set-rpath '$ORIGIN/../../lib:$ORIGIN' "${plugin_so}"
+    done
+
+    # 5. Install desktop entry and extract true 256x256 (ic08) & 512x512 (ic09) hicolor PNG icons.
+    mkdir -p "${prefix}/share/applications"
+    cp -L "${ROOT_DIR}/Resources/com.spell.BeatrixLeslieIDE.desktop" "${prefix}/share/applications/com.spell.BeatrixLeslieIDE.desktop"
+    extract_linux_hicolor_icons "${prefix}"
+
+    echo "==> Self-contained Linux deployment completed for ${prefix}"
+}
+
+package_linux_appimage() {
+    local prefix="$1"
+    local out_raw="$2"
+    local out_path
+    out_path="$(resolve_path "${out_raw}")"
+
+    echo "==> Packaging self-contained Linux AppImage: ${out_path}"
+    mkdir -p "$(dirname "${out_path}")"
+
+    local stage_dir
+    stage_dir="$(mktemp -d "${RUNNER_TEMP:-/tmp}/spell-appimage.XXXXXX")"
+    local appdir="${stage_dir}/AppDir"
+    mkdir -p "${appdir}/usr"
+    cp -a "${prefix}/." "${appdir}/usr/"
+
+    cp -L "${ROOT_DIR}/Resources/com.spell.BeatrixLeslieIDE.desktop" "${appdir}/com.spell.BeatrixLeslieIDE.desktop"
+
+    local icon_256="${appdir}/usr/share/icons/hicolor/256x256/apps/com.spell.BeatrixLeslieIDE.png"
+    if [[ -f "${icon_256}" ]]; then
+        cp -L "${icon_256}" "${appdir}/com.spell.BeatrixLeslieIDE.png"
+    else
+        cp -L "${ROOT_DIR}/Resources/AppIconRounded.png" "${appdir}/com.spell.BeatrixLeslieIDE.png"
+    fi
+    ln -sf com.spell.BeatrixLeslieIDE.png "${appdir}/.DirIcon"
+
+    cat > "${appdir}/AppRun" <<'EOF'
+#!/bin/sh
+set -eu
+HERE="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+exec "${HERE}/usr/bin/BeatrixLeslieIDE" "$@"
+EOF
+    chmod 0755 "${appdir}/AppRun"
+
+    local appimagetool_bin=""
+    if command -v appimagetool >/dev/null 2>&1; then
+        appimagetool_bin="$(command -v appimagetool)"
+    elif command -v appimagetool-x86_64.AppImage >/dev/null 2>&1; then
+        appimagetool_bin="$(command -v appimagetool-x86_64.AppImage)"
+    else
+        appimagetool_bin="${RUNNER_TEMP:-/tmp}/appimagetool-x86_64.AppImage"
+        if [[ ! -x "${appimagetool_bin}" ]]; then
+            echo "==> Downloading appimagetool-x86_64.AppImage to ${appimagetool_bin}"
+            curl --fail --location --retry 3 --retry-delay 2 \
+                -o "${appimagetool_bin}" \
+                "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage"
+            chmod +x "${appimagetool_bin}"
+        fi
+    fi
+
+    ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 "${appimagetool_bin}" "${appdir}" "${out_path}"
+    chmod +x "${out_path}"
+    rm -rf "${stage_dir}"
+
+    echo "==> Smoke-testing AppImage (--appimage-extract-and-run --version)"
+    local appimage_ver
+    appimage_ver="$(env -u LD_LIBRARY_PATH QT_QPA_PLATFORM=offscreen SPELL_EPHEMERAL_KEYRING=1 "${out_path}" --appimage-extract-and-run --version)"
+    echo "${appimage_ver}"
+    if ! grep -Fq "BeatrixLeslie IDE" <<<"${appimage_ver}"; then
+        echo "Error: AppImage --version smoke test returned unexpected output: ${appimage_ver}" >&2
+        exit 1
+    fi
+    echo "==> AppImage verified: ${out_path}"
 }
 
 if [[ "${DEPLOY_QT}" -eq 1 ]]; then
@@ -393,8 +1011,11 @@ if [[ "${DEPLOY_QT}" -eq 1 ]]; then
                 deploy_macos_bundle "${RESOLVED_BUILD_DIR}/BeatrixLeslieIDE.app"
             fi
             ;;
+        Linux)
+            deploy_linux_bundle "${RESOLVED_INSTALL_PREFIX}"
+            ;;
         *)
-            echo "Warning: --deploy-qt in build_and_run.sh applies only to macOS bundles (detected: ${OS_NAME})." >&2
+            echo "Warning: --deploy-qt in build_and_run.sh is supported on macOS and Linux (detected: ${OS_NAME})." >&2
             ;;
     esac
 fi
@@ -415,6 +1036,35 @@ verify_macos_bundle() {
     if [[ ! -f "${bundled_dylib}" ]]; then
         echo "Error: Missing bundled dylib ${bundled_dylib}" >&2
         exit 1
+    fi
+
+    if [[ -n "${TARGET_ARCH}" ]] && command -v lipo >/dev/null 2>&1; then
+        local app_archs dylib_archs
+        app_archs="$(lipo -archs "${app_bin}")"
+        dylib_archs="$(lipo -archs "${bundled_dylib}")"
+        echo "    Executable archs: ${app_archs} | libspell_core.dylib archs: ${dylib_archs}"
+        case "${TARGET_ARCH}" in
+            arm64)
+                if [[ "${app_archs}" != *"arm64"* || "${dylib_archs}" != *"arm64"* ]]; then
+                    echo "Error: Expected arm64 slice in ${app_bin} (${app_archs}) and ${bundled_dylib} (${dylib_archs})" >&2
+                    exit 1
+                fi
+                ;;
+            x86_64)
+                if [[ "${app_archs}" != *"x86_64"* || "${dylib_archs}" != *"x86_64"* ]]; then
+                    echo "Error: Expected x86_64 slice in ${app_bin} (${app_archs}) and ${bundled_dylib} (${dylib_archs})" >&2
+                    exit 1
+                fi
+                ;;
+            universal2)
+                for req_arch in arm64 x86_64; do
+                    if [[ "${app_archs}" != *"${req_arch}"* || "${dylib_archs}" != *"${req_arch}"* ]]; then
+                        echo "Error: Universal2 bundle missing '${req_arch}' slice (app: ${app_archs}, dylib: ${dylib_archs})" >&2
+                        exit 1
+                    fi
+                done
+                ;;
+        esac
     fi
 
     local app_otool
@@ -480,8 +1130,6 @@ verify_macos_bundle() {
                         break
                     fi
                 done
-                # In strict installed mode without macdeployqt, Qt/QScintilla frameworks may remain
-                # in Homebrew while libspell_core.dylib MUST resolve inside Contents/Frameworks.
                 if [[ "${found}" -eq 0 ]]; then
                     if [[ "${strict_self_contained}" -eq 0 && "${strict_install_rpath}" -eq 1 && "${rel}" != "libspell_core.dylib" ]]; then
                         continue
@@ -570,14 +1218,17 @@ verify_macos_bundle() {
 
 verify_linux_binary() {
     local app_bin="$1"
-    echo "==> Verifying Linux ELF dynamic loader resolution: ${app_bin}"
+    local strict_self_contained="${2:-0}"
+    local deployed_prefix="${3:-}"
+
+    echo "==> Verifying Linux ELF dynamic loader resolution (self_contained=${strict_self_contained}): ${app_bin}"
     if [[ ! -x "${app_bin}" ]]; then
         echo "Error: Missing executable ${app_bin}" >&2
         exit 1
     fi
 
     local ldd_out
-    ldd_out="$(ldd "${app_bin}")"
+    ldd_out="$(env -u LD_LIBRARY_PATH ldd "${app_bin}")"
     echo "${ldd_out}"
 
     if grep -Fq "not found" <<<"${ldd_out}"; then
@@ -597,6 +1248,72 @@ verify_linux_binary() {
             exit 1
         fi
     fi
+
+    if [[ "${strict_self_contained}" -eq 1 && -n "${deployed_prefix}" ]]; then
+        echo "==> Verifying self-contained Linux bundle layout in ${deployed_prefix}"
+        local req_path
+        for req_path in \
+            "${deployed_prefix}/bin/qt.conf" \
+            "${deployed_prefix}/plugins/platforms/libqxcb.so" \
+            "${deployed_prefix}/plugins/platforms/libqoffscreen.so" \
+            "${deployed_prefix}/share/applications/com.spell.BeatrixLeslieIDE.desktop" \
+            "${deployed_prefix}/share/icons/hicolor/256x256/apps/com.spell.BeatrixLeslieIDE.png" \
+            "${deployed_prefix}/share/icons/hicolor/512x512/apps/com.spell.BeatrixLeslieIDE.png"; do
+            if [[ ! -f "${req_path}" ]]; then
+                echo "Error: Self-contained Linux prefix is missing required file ${req_path}" >&2
+                exit 1
+            fi
+        done
+
+        local found_qtwidgets=0
+        local cand_lib
+        for cand_lib in "${deployed_prefix}/lib/"libQt6Widgets.so*; do
+            if [[ -f "${cand_lib}" ]]; then
+                found_qtwidgets=1
+                break
+            fi
+        done
+        if [[ "${found_qtwidgets}" -eq 0 ]]; then
+            echo "Error: Missing bundled libQt6Widgets.so* in ${deployed_prefix}/lib" >&2
+            exit 1
+        fi
+
+        local found_qsci=0
+        for cand_lib in "${deployed_prefix}/lib/"libqscintilla2_qt6.so*; do
+            if [[ -f "${cand_lib}" ]]; then
+                found_qsci=1
+                break
+            fi
+        done
+        if [[ "${found_qsci}" -eq 0 ]]; then
+            echo "Error: Missing bundled libqscintilla2_qt6.so* in ${deployed_prefix}/lib" >&2
+            exit 1
+        fi
+
+        local plugin_so plugin_ldd
+        local plugin_count=0
+        for plugin_so in "${deployed_prefix}/plugins/"*/*.so; do
+            [[ -f "${plugin_so}" ]] || continue
+            plugin_count=$(( plugin_count + 1 ))
+            plugin_ldd="$(env -u LD_LIBRARY_PATH ldd "${plugin_so}")"
+            if grep -Fq "not found" <<<"${plugin_ldd}"; then
+                echo "Error: Unresolved shared library ('not found') in plugin ${plugin_so}:" >&2
+                echo "${plugin_ldd}" >&2
+                exit 1
+            fi
+        done
+        echo "==> Audited ${plugin_count} bundled Qt 6 plugins: zero unresolved shared libraries"
+
+        echo "==> Running headless offscreen startup check (${app_bin} --version)"
+        local ver_out
+        ver_out="$(env -u LD_LIBRARY_PATH QT_QPA_PLATFORM=offscreen SPELL_EPHEMERAL_KEYRING=1 "${app_bin}" --version)"
+        echo "${ver_out}"
+        if ! grep -Fq "BeatrixLeslie IDE" <<<"${ver_out}"; then
+            echo "Error: Headless --version check returned unexpected output: ${ver_out}" >&2
+            exit 1
+        fi
+    fi
+
     echo "==> Linux loader verification passed for ${app_bin}"
 }
 
@@ -611,15 +1328,19 @@ if [[ "${VERIFY_LOADER}" -eq 1 ]]; then
             fi
             ;;
         Linux)
-            verify_linux_binary "${RESOLVED_BUILD_DIR}/BeatrixLeslieIDE"
+            verify_linux_binary "${RESOLVED_BUILD_DIR}/BeatrixLeslieIDE" 0 ""
             if [[ -n "${RESOLVED_INSTALL_PREFIX}" ]]; then
-                verify_linux_binary "${RESOLVED_INSTALL_PREFIX}/bin/BeatrixLeslieIDE"
+                verify_linux_binary "${RESOLVED_INSTALL_PREFIX}/bin/BeatrixLeslieIDE" "${DEPLOY_QT}" "${RESOLVED_INSTALL_PREFIX}"
             fi
             ;;
         *)
             echo "Warning: --verify-loader is only supported on macOS (Darwin) and Linux (detected: ${OS_NAME})." >&2
             ;;
     esac
+fi
+
+if [[ -n "${APPIMAGE_OUTPUT}" ]]; then
+    package_linux_appimage "${RESOLVED_INSTALL_PREFIX}" "${APPIMAGE_OUTPUT}"
 fi
 
 if [[ "${RUN_APP}" -eq 1 ]]; then
@@ -629,6 +1350,13 @@ if [[ "${RUN_APP}" -eq 1 ]]; then
                 APP_EXEC="${RESOLVED_INSTALL_PREFIX}/BeatrixLeslieIDE.app/Contents/MacOS/BeatrixLeslieIDE"
             else
                 APP_EXEC="${RESOLVED_BUILD_DIR}/BeatrixLeslieIDE.app/Contents/MacOS/BeatrixLeslieIDE"
+            fi
+            ;;
+        Linux)
+            if [[ "${DEPLOY_QT}" -eq 1 && -n "${RESOLVED_INSTALL_PREFIX}" ]]; then
+                APP_EXEC="${RESOLVED_INSTALL_PREFIX}/bin/BeatrixLeslieIDE"
+            else
+                APP_EXEC="${RESOLVED_BUILD_DIR}/BeatrixLeslieIDE"
             fi
             ;;
         *)

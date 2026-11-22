@@ -4,6 +4,10 @@ param(
     [ValidateSet("Release", "Debug", "RelWithDebInfo", "MinSizeRel")]
     [string]$Configuration = "Release",
     [string]$InstallPrefix = "",
+    [switch]$StrictWarnings,
+    [switch]$NoWerror,
+    [string]$SignPfxPath = $env:SPELL_WINDOWS_PFX_PATH,
+    [string]$SignPfxPassword = $env:SPELL_WINDOWS_PFX_PASSWORD,
     [switch]$Test,
     [switch]$VerifyLoader,
     [switch]$DeployQt,
@@ -59,6 +63,71 @@ function Find-WinDeployQt {
         }
     }
     return $null
+}
+
+function Find-SignTool {
+    $Cmd = Get-Command signtool.exe, signtool -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($null -ne $Cmd) {
+        return $Cmd.Source
+    }
+    $ProgFilesX86 = ${env:ProgramFiles(x86)}
+    if (-not [string]::IsNullOrWhiteSpace($ProgFilesX86)) {
+        $KitsRoot = Join-Path $ProgFilesX86 "Windows Kits\10\bin"
+        if (Test-Path -LiteralPath $KitsRoot -PathType Container) {
+            $Found = Get-ChildItem -Path $KitsRoot -Recurse -Filter "signtool.exe" -File -ErrorAction SilentlyContinue |
+                Where-Object { $_.FullName -match "\\x64\\signtool\.exe$" } |
+                Sort-Object FullName -Descending |
+                Select-Object -First 1
+            if ($null -ne $Found) {
+                return $Found.FullName
+            }
+        }
+    }
+    throw "signtool.exe was not found on PATH or under Windows Kits\10\bin. Install the Windows 10/11 SDK to sign binaries."
+}
+
+function Invoke-AuthenticodeSignOnTargetDir {
+    param([string]$TargetExe, [string]$PfxPath, [string]$PfxPassword)
+    $ResolvedPfx = Resolve-WorkspacePath -InputPath $PfxPath
+    if (-not (Test-Path -LiteralPath $ResolvedPfx -PathType Leaf)) {
+        throw "Windows signing PFX file was not found at '$ResolvedPfx'."
+    }
+    $SignToolExe = Find-SignTool
+    $TargetDir = Split-Path -Parent $TargetExe
+
+    $Targets = @()
+    $CoreDll = Join-Path $TargetDir "spell_core.dll"
+    if (Test-Path -LiteralPath $CoreDll -PathType Leaf) {
+        $Targets += $CoreDll
+    }
+    foreach ($QsciDll in @(Get-ChildItem -Path $TargetDir -Filter "qscintilla2*.dll" -File -ErrorAction SilentlyContinue)) {
+        $Targets += $QsciDll.FullName
+    }
+    if (Test-Path -LiteralPath $TargetExe -PathType Leaf) {
+        $Targets += $TargetExe
+    }
+
+    if ($Targets.Count -eq 0) {
+        throw "No signable PE targets found in '$TargetDir'."
+    }
+
+    Write-Host "==> Signing Windows binaries in $TargetDir with signtool.exe ($($Targets.Count) file(s))"
+    $SignArgs = @(
+        "sign",
+        "/fd", "SHA256",
+        "/tr", "http://timestamp.digicert.com",
+        "/td", "SHA256",
+        "/f", $ResolvedPfx
+    )
+    if (-not [string]::IsNullOrWhiteSpace($PfxPassword)) {
+        $SignArgs += @("/p", $PfxPassword)
+    }
+    $SignArgs += $Targets
+
+    & $SignToolExe @SignArgs
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
 }
 
 function Invoke-WinDeployQtOnTarget {
@@ -187,79 +256,106 @@ function Test-WindowsRuntimeLayout {
 }
 
 $ResolvedBuildDir = Resolve-WorkspacePath -InputPath $BuildDir
+$WerrorValue = if ($NoWerror) { "OFF" } else { "ON" }
 
-Write-Host "==> Configuring BeatrixLeslie IDE ($Configuration) in $ResolvedBuildDir"
-& cmake -S $RootDir -B $ResolvedBuildDir "-DCMAKE_BUILD_TYPE=$Configuration" "-DSPELL_BUILD_RUST=ON"
-if ($LASTEXITCODE -ne 0) {
-    exit $LASTEXITCODE
-}
-
-$ParallelJobs = [Math]::Max(1, [Environment]::ProcessorCount)
-Write-Host "==> Building BeatrixLeslie IDE ($Configuration, parallel jobs: $ParallelJobs)"
-& cmake --build $ResolvedBuildDir --config $Configuration --parallel $ParallelJobs
-if ($LASTEXITCODE -ne 0) {
-    exit $LASTEXITCODE
-}
-
-$AppExe = Find-BuiltExecutable -BaseBuildDir $ResolvedBuildDir -Config $Configuration
-
-$WinDeployQtExe = $null
-if ($DeployQt) {
-    $WinDeployQtExe = Find-WinDeployQt
-    if ($null -eq $WinDeployQtExe) {
-        throw "windeployqt was not found on PATH or under Qt6_DIR / QT_ROOT_DIR. Add your Qt6 bin directory to PATH when passing -DeployQt."
+$PrevRustFlags = $env:RUSTFLAGS
+try {
+    if ($StrictWarnings) {
+        $env:RUSTFLAGS = if ([string]::IsNullOrWhiteSpace($PrevRustFlags)) {
+            "-D warnings"
+        } else {
+            "$PrevRustFlags -D warnings"
+        }
+        Write-Host "==> Strict warnings enabled (SPELL_WARNINGS_AS_ERRORS=ON, RUSTFLAGS='$($env:RUSTFLAGS)')"
     }
-    Invoke-WinDeployQtOnTarget -WinDeployQtExe $WinDeployQtExe -TargetExe $AppExe -Config $Configuration
+
+    Write-Host "==> Configuring BeatrixLeslie IDE ($Configuration) in $ResolvedBuildDir"
+    & cmake -S $RootDir -B $ResolvedBuildDir `
+        "-DCMAKE_BUILD_TYPE=$Configuration" `
+        "-DSPELL_BUILD_RUST=ON" `
+        "-DSPELL_WARNINGS_AS_ERRORS=$WerrorValue"
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+
+    $ParallelJobs = [Math]::Max(1, [Environment]::ProcessorCount)
+    Write-Host "==> Building BeatrixLeslie IDE ($Configuration, parallel jobs: $ParallelJobs)"
+    & cmake --build $ResolvedBuildDir --config $Configuration --parallel $ParallelJobs
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+
+    $AppExe = Find-BuiltExecutable -BaseBuildDir $ResolvedBuildDir -Config $Configuration
+
+    $WinDeployQtExe = $null
+    if ($DeployQt) {
+        $WinDeployQtExe = Find-WinDeployQt
+        if ($null -eq $WinDeployQtExe) {
+            throw "windeployqt was not found on PATH or under Qt6_DIR / QT_ROOT_DIR. Add your Qt6 bin directory to PATH when passing -DeployQt."
+        }
+        Invoke-WinDeployQtOnTarget -WinDeployQtExe $WinDeployQtExe -TargetExe $AppExe -Config $Configuration
+
+        if ($Test) {
+            $TestExe = Find-BuiltExecutable -BaseBuildDir $ResolvedBuildDir -Config $Configuration -ExeName "SpellQtTests.exe"
+            Invoke-WinDeployQtOnTarget -WinDeployQtExe $WinDeployQtExe -TargetExe $TestExe -Config $Configuration
+        }
+    }
 
     if ($Test) {
-        $TestExe = Find-BuiltExecutable -BaseBuildDir $ResolvedBuildDir -Config $Configuration -ExeName "SpellQtTests.exe"
-        Invoke-WinDeployQtOnTarget -WinDeployQtExe $WinDeployQtExe -TargetExe $TestExe -Config $Configuration
-    }
-}
+        Write-Host "==> Running spell_core Rust tests (SPELL_EPHEMERAL_KEYRING=1)"
+        $PrevEphemeral = $env:SPELL_EPHEMERAL_KEYRING
+        try {
+            $env:SPELL_EPHEMERAL_KEYRING = "1"
+            & cargo test --manifest-path (Join-Path $RootDir "rust\spell_core\Cargo.toml") --target-dir (Join-Path $RootDir "rust\spell_core\target")
+            if ($LASTEXITCODE -ne 0) {
+                exit $LASTEXITCODE
+            }
+        } finally {
+            if ($null -eq $PrevEphemeral) {
+                Remove-Item Env:\SPELL_EPHEMERAL_KEYRING -ErrorAction SilentlyContinue
+            } else {
+                $env:SPELL_EPHEMERAL_KEYRING = $PrevEphemeral
+            }
+        }
 
-if ($Test) {
-    Write-Host "==> Running spell_core Rust tests (SPELL_EPHEMERAL_KEYRING=1)"
-    $PrevEphemeral = $env:SPELL_EPHEMERAL_KEYRING
-    try {
-        $env:SPELL_EPHEMERAL_KEYRING = "1"
-        & cargo test --manifest-path (Join-Path $RootDir "rust\spell_core\Cargo.toml") --target-dir (Join-Path $RootDir "rust\spell_core\target")
+        Write-Host "==> Running SpellQtTests via CTest"
+        & ctest --test-dir $ResolvedBuildDir -C $Configuration --output-on-failure
         if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
         }
-    } finally {
-        if ($null -eq $PrevEphemeral) {
-            Remove-Item Env:\SPELL_EPHEMERAL_KEYRING -ErrorAction SilentlyContinue
-        } else {
-            $env:SPELL_EPHEMERAL_KEYRING = $PrevEphemeral
+    }
+
+    $InstalledAppExe = ""
+    if (-not [string]::IsNullOrWhiteSpace($InstallPrefix)) {
+        $ResolvedInstallPrefix = Resolve-WorkspacePath -InputPath $InstallPrefix
+        Write-Host "==> Installing BeatrixLeslie IDE to $ResolvedInstallPrefix"
+        & cmake --install $ResolvedBuildDir --config $Configuration --prefix $ResolvedInstallPrefix
+        if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+        }
+
+        $InstalledAppExe = Join-Path $ResolvedInstallPrefix "bin\BeatrixLeslieIDE.exe"
+        if ($DeployQt) {
+            Invoke-WinDeployQtOnTarget -WinDeployQtExe $WinDeployQtExe -TargetExe $InstalledAppExe -Config $Configuration
         }
     }
 
-    Write-Host "==> Running SpellQtTests via CTest"
-    & ctest --test-dir $ResolvedBuildDir -C $Configuration --output-on-failure
-    if ($LASTEXITCODE -ne 0) {
-        exit $LASTEXITCODE
-    }
-}
-
-$InstalledAppExe = ""
-if (-not [string]::IsNullOrWhiteSpace($InstallPrefix)) {
-    $ResolvedInstallPrefix = Resolve-WorkspacePath -InputPath $InstallPrefix
-    Write-Host "==> Installing BeatrixLeslie IDE to $ResolvedInstallPrefix"
-    & cmake --install $ResolvedBuildDir --config $Configuration --prefix $ResolvedInstallPrefix
-    if ($LASTEXITCODE -ne 0) {
-        exit $LASTEXITCODE
+    if (-not [string]::IsNullOrWhiteSpace($SignPfxPath)) {
+        $SignTargetExe = if (-not [string]::IsNullOrWhiteSpace($InstalledAppExe)) { $InstalledAppExe } else { $AppExe }
+        Invoke-AuthenticodeSignOnTargetDir -TargetExe $SignTargetExe -PfxPath $SignPfxPath -PfxPassword $SignPfxPassword
     }
 
-    $InstalledAppExe = Join-Path $ResolvedInstallPrefix "bin\BeatrixLeslieIDE.exe"
-    if ($DeployQt) {
-        Invoke-WinDeployQtOnTarget -WinDeployQtExe $WinDeployQtExe -TargetExe $InstalledAppExe -Config $Configuration
+    if ($VerifyLoader) {
+        Test-WindowsRuntimeLayout -TargetExe $AppExe -RequireQtDlls $DeployQt.IsPresent
+        if (-not [string]::IsNullOrWhiteSpace($InstalledAppExe)) {
+            Test-WindowsRuntimeLayout -TargetExe $InstalledAppExe -RequireQtDlls $DeployQt.IsPresent
+        }
     }
-}
-
-if ($VerifyLoader) {
-    Test-WindowsRuntimeLayout -TargetExe $AppExe -RequireQtDlls $DeployQt.IsPresent
-    if (-not [string]::IsNullOrWhiteSpace($InstalledAppExe)) {
-        Test-WindowsRuntimeLayout -TargetExe $InstalledAppExe -RequireQtDlls $DeployQt.IsPresent
+} finally {
+    if ($null -eq $PrevRustFlags) {
+        Remove-Item Env:\RUSTFLAGS -ErrorAction SilentlyContinue
+    } else {
+        $env:RUSTFLAGS = $PrevRustFlags
     }
 }
 

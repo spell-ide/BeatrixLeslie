@@ -13,6 +13,8 @@ set(CMAKE_MACOSX_RPATH ON)
 set(CMAKE_BUILD_WITH_INSTALL_RPATH OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+option(SPELL_WARNINGS_AS_ERRORS "Treat C++ compiler warnings as errors" ON)
+
 # Automatically help CMake locate Homebrew Qt 6 and QScintilla2 on macOS,
 # and honor environment Qt / chainload prefixes on Windows and Linux.
 if(DEFINED QT_Chainload AND EXISTS "${QT_Chainload}")
@@ -34,29 +36,42 @@ endforeach()
 unset(_spell_env_prefix_var)
 
 if(APPLE)
-    foreach(_spell_brew_prefix
-        "/opt/homebrew/opt/qtbase"
-        "/opt/homebrew/opt/qtsvg"
-        "/opt/homebrew/opt/qscintilla2"
-        "/opt/homebrew/opt/qt"
-        "/usr/local/opt/qtbase"
-        "/usr/local/opt/qtsvg"
-        "/usr/local/opt/qscintilla2"
-        "/usr/local/opt/qt"
-    )
-        if(EXISTS "${_spell_brew_prefix}")
-            list(APPEND CMAKE_PREFIX_PATH "${_spell_brew_prefix}")
-        endif()
+    set(_spell_prefer_intel_brew FALSE)
+    if("x86_64" IN_LIST CMAKE_OSX_ARCHITECTURES AND NOT "arm64" IN_LIST CMAKE_OSX_ARCHITECTURES)
+        set(_spell_prefer_intel_brew TRUE)
+    elseif(NOT CMAKE_OSX_ARCHITECTURES AND CMAKE_HOST_SYSTEM_PROCESSOR STREQUAL "x86_64")
+        set(_spell_prefer_intel_brew TRUE)
+    endif()
+
+    if(_spell_prefer_intel_brew)
+        set(_spell_brew_roots "/usr/local" "/opt/homebrew")
+    else()
+        set(_spell_brew_roots "/opt/homebrew" "/usr/local")
+    endif()
+
+    foreach(_spell_brew_root ${_spell_brew_roots})
+        foreach(_spell_brew_formula qtbase qtsvg qscintilla2 qt)
+            set(_spell_brew_prefix "${_spell_brew_root}/opt/${_spell_brew_formula}")
+            if(EXISTS "${_spell_brew_prefix}")
+                list(APPEND CMAKE_PREFIX_PATH "${_spell_brew_prefix}")
+            endif()
+        endforeach()
     endforeach()
-    unset(_spell_brew_prefix)
 
     # Homebrew installs Qt6Svg in a separate prefix from Qt6Config.cmake (qtbase),
     # and Qt6Config searches sibling components with NO_DEFAULT_PATH unless listed here.
-    foreach(_spell_qtsvg_prefix "/opt/homebrew/opt/qtsvg" "/usr/local/opt/qtsvg")
+    foreach(_spell_brew_root ${_spell_brew_roots})
+        set(_spell_qtsvg_prefix "${_spell_brew_root}/opt/qtsvg")
         if(EXISTS "${_spell_qtsvg_prefix}")
             list(APPEND QT_ADDITIONAL_PACKAGES_PREFIX_PATH "${_spell_qtsvg_prefix}")
         endif()
     endforeach()
+
+    unset(_spell_prefer_intel_brew)
+    unset(_spell_brew_roots)
+    unset(_spell_brew_root)
+    unset(_spell_brew_formula)
+    unset(_spell_brew_prefix)
     unset(_spell_qtsvg_prefix)
 endif()
 
@@ -139,7 +154,8 @@ if(NOT QSCINTILLA_INCLUDE_DIR OR NOT QSCINTILLA_LIBRARY)
         "  QSCINTILLA_INCLUDE_DIR = ${QSCINTILLA_INCLUDE_DIR}\n"
         "  QSCINTILLA_LIBRARY     = ${QSCINTILLA_LIBRARY}\n"
         "Install QScintilla2 for Qt 6 (for example: 'brew install qscintilla2' on macOS, "
-        "'sudo apt install libqscintilla2-qt6-dev' on Debian/Ubuntu, or via vcpkg on Windows), "
+        "'sudo apt install libqscintilla2-qt6-dev' on Debian/Ubuntu, or run "
+        "'scripts/install_qscintilla_windows.ps1' on Windows), "
         "or pass -DQSCINTILLA_INCLUDE_DIR=<path> -DQSCINTILLA_LIBRARY=<path> or extend CMAKE_PREFIX_PATH."
     )
 endif()
@@ -220,9 +236,56 @@ endif()
 if(APPLE)
     find_program(INSTALL_NAME_TOOL_EXECUTABLE install_name_tool)
     find_program(CODESIGN_EXECUTABLE codesign)
+    find_program(LIPO_EXECUTABLE lipo)
 endif()
 
 find_program(CARGO_EXECUTABLE cargo)
+
+set(_spell_osx_has_arm64 FALSE)
+set(_spell_osx_has_x86_64 FALSE)
+if(APPLE)
+    if("arm64" IN_LIST CMAKE_OSX_ARCHITECTURES)
+        set(_spell_osx_has_arm64 TRUE)
+    endif()
+    if("x86_64" IN_LIST CMAKE_OSX_ARCHITECTURES)
+        set(_spell_osx_has_x86_64 TRUE)
+    endif()
+endif()
+
+if(APPLE AND _spell_osx_has_arm64 AND _spell_osx_has_x86_64)
+    if(SPELL_BUILD_RUST AND NOT LIPO_EXECUTABLE)
+        message(FATAL_ERROR "Universal2 build requested (CMAKE_OSX_ARCHITECTURES='${CMAKE_OSX_ARCHITECTURES}'), but 'lipo' was not found in PATH.")
+    endif()
+    set(_spell_rust_build_cmds
+        COMMAND "${CARGO_EXECUTABLE}" build --release --lib --target aarch64-apple-darwin --target-dir "${SPELL_CORE_DIR}/target"
+        COMMAND "${CARGO_EXECUTABLE}" build --release --lib --target x86_64-apple-darwin --target-dir "${SPELL_CORE_DIR}/target"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${SPELL_CORE_TARGET_DIR}"
+        COMMAND "${LIPO_EXECUTABLE}" -create
+            "${SPELL_CORE_DIR}/target/aarch64-apple-darwin/release/libspell_core.dylib"
+            "${SPELL_CORE_DIR}/target/x86_64-apple-darwin/release/libspell_core.dylib"
+            -output "${SPELL_CORE_TARGET_DIR}/libspell_core.dylib"
+    )
+elseif(APPLE AND _spell_osx_has_arm64)
+    set(_spell_rust_build_cmds
+        COMMAND "${CARGO_EXECUTABLE}" build --release --lib --target aarch64-apple-darwin --target-dir "${SPELL_CORE_DIR}/target"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${SPELL_CORE_TARGET_DIR}"
+        COMMAND "${CMAKE_COMMAND}" -E copy
+            "${SPELL_CORE_DIR}/target/aarch64-apple-darwin/release/libspell_core.dylib"
+            "${SPELL_CORE_TARGET_DIR}/libspell_core.dylib"
+    )
+elseif(APPLE AND _spell_osx_has_x86_64)
+    set(_spell_rust_build_cmds
+        COMMAND "${CARGO_EXECUTABLE}" build --release --lib --target x86_64-apple-darwin --target-dir "${SPELL_CORE_DIR}/target"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${SPELL_CORE_TARGET_DIR}"
+        COMMAND "${CMAKE_COMMAND}" -E copy
+            "${SPELL_CORE_DIR}/target/x86_64-apple-darwin/release/libspell_core.dylib"
+            "${SPELL_CORE_TARGET_DIR}/libspell_core.dylib"
+    )
+else()
+    set(_spell_rust_build_cmds
+        COMMAND "${CARGO_EXECUTABLE}" build --release --lib --target-dir "${SPELL_CORE_DIR}/target"
+    )
+endif()
 
 set(_spell_rust_post_cmds "")
 if(APPLE)
@@ -248,7 +311,7 @@ if(SPELL_BUILD_RUST)
     endif()
     list(REMOVE_DUPLICATES _spell_rust_byproducts)
     add_custom_target(spell_build_rust ALL
-        COMMAND "${CARGO_EXECUTABLE}" build --release --lib --target-dir "${SPELL_CORE_DIR}/target"
+        ${_spell_rust_build_cmds}
         ${_spell_rust_post_cmds}
         WORKING_DIRECTORY "${SPELL_CORE_DIR}"
         BYPRODUCTS ${_spell_rust_byproducts}
@@ -259,7 +322,7 @@ if(SPELL_BUILD_RUST)
 else()
     if(CARGO_EXECUTABLE)
         add_custom_target(spell_build_rust
-            COMMAND "${CARGO_EXECUTABLE}" build --release --lib --target-dir "${SPELL_CORE_DIR}/target"
+            ${_spell_rust_build_cmds}
             ${_spell_rust_post_cmds}
             WORKING_DIRECTORY "${SPELL_CORE_DIR}"
             COMMENT "Building spell_core Rust library (release)"
@@ -273,6 +336,9 @@ else()
         )
     endif()
 endif()
+unset(_spell_osx_has_arm64)
+unset(_spell_osx_has_x86_64)
+unset(_spell_rust_build_cmds)
 unset(_spell_rust_post_cmds)
 
 # On Linux/ELF, Rust cdylibs omit DT_SONAME by default; using IMPORTED_NO_SONAME
@@ -387,6 +453,10 @@ target_include_directories(SpellCoreLib
     PUBLIC
         "${CMAKE_SOURCE_DIR}/cpp"
         "${CMAKE_SOURCE_DIR}/rust/spell_core/include"
+)
+
+target_include_directories(SpellCoreLib
+    SYSTEM PUBLIC
         "${QSCINTILLA_INCLUDE_DIR}"
 )
 
@@ -411,7 +481,18 @@ elseif(WIN32)
 endif()
 
 if(MSVC)
-    target_compile_options(SpellCoreLib PUBLIC /utf-8)
+    target_compile_options(SpellCoreLib PUBLIC
+        /utf-8
+        /W4
+        /external:W0
+        $<$<BOOL:${SPELL_WARNINGS_AS_ERRORS}>:/WX>
+    )
+else()
+    target_compile_options(SpellCoreLib PUBLIC
+        -Wall
+        -Wextra
+        $<$<BOOL:${SPELL_WARNINGS_AS_ERRORS}>:-Werror>
+    )
 endif()
 
 if(SPELL_BUILD_RUST)
@@ -756,6 +837,17 @@ elseif(UNIX)
     install(FILES ${SPELL_BUNDLE_RESOURCES}
         DESTINATION share/BeatrixLeslieIDE/Resources
     )
+    install(FILES "${CMAKE_SOURCE_DIR}/Resources/com.spell.BeatrixLeslieIDE.desktop"
+        DESTINATION share/applications
+    )
+    install(FILES "${CMAKE_SOURCE_DIR}/Resources/AppIconRounded.png"
+        DESTINATION share/icons/hicolor/512x512/apps
+        RENAME com.spell.BeatrixLeslieIDE.png
+    )
+    install(FILES "${CMAKE_SOURCE_DIR}/Resources/AppIconRounded.png"
+        DESTINATION share/icons/hicolor/256x256/apps
+        RENAME com.spell.BeatrixLeslieIDE.png
+    )
 endif()
 
 # ---------------------------------------------------------------------------
@@ -768,5 +860,9 @@ message(STATUS "  QScintilla library:  ${QSCINTILLA_LIBRARY}")
 if(WIN32)
     message(STATUS "  QScintilla runtime:  ${QSCINTILLA_RUNTIME_DLL}")
 endif()
+if(APPLE AND CMAKE_OSX_ARCHITECTURES)
+    message(STATUS "  macOS architectures: ${CMAKE_OSX_ARCHITECTURES}")
+endif()
 message(STATUS "  spell_core library:  ${SPELL_CORE_LIBRARY}")
 message(STATUS "  SPELL_BUILD_RUST:    ${SPELL_BUILD_RUST}")
+message(STATUS "  Warnings as errors:  ${SPELL_WARNINGS_AS_ERRORS}")

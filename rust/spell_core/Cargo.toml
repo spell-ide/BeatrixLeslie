@@ -24,8 +24,8 @@ directories = "5"
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 sysinfo = "0.33"
 flate2 = "1"
-lopdf = "0.34"
-libsqlite3-sys = { version = "0.30", features = ["bundled"] }
+lopdf = "0.47"
+libsqlite3-sys = { version = "0.40", features = ["bundled"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "=0.2.191"

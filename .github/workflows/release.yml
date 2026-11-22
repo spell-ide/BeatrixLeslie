@@ -19,261 +19,19 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  macos:
-    name: Package macOS (arm64)
-    runs-on: macos-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.tag || github.ref }}
-
-      - name: Install Homebrew dependencies
-        run: |
-          HOMEBREW_NO_AUTO_UPDATE=1 brew install cmake ninja qtbase qtsvg qscintilla2
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: rust/spell_core
-          cache-on-failure: true
-
-      - name: Verify third-party license notices
-        run: python3 scripts/generate_third_party_licenses.py --check
-
-      - name: Build, deploy Qt, test, and verify self-contained bundle
-        run: ./scripts/build_and_run.sh --install dist --deploy-qt --test --verify-loader
-
-      - name: Create macOS zip archive
-        run: |
-          ditto -c -k --sequesterRsrc --keepParent dist/BeatrixLeslieIDE.app BeatrixLeslieIDE-macos-arm64.zip
-
-      - name: Upload macOS archive
-        uses: actions/upload-artifact@v4
-        with:
-          name: BeatrixLeslieIDE-macos-arm64
-          path: BeatrixLeslieIDE-macos-arm64.zip
-          if-no-files-found: error
-
-  linux:
-    name: Package Linux (x86_64)
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.tag || github.ref }}
-
-      - name: Install APT dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            cmake \
-            ninja-build \
-            pkg-config \
-            qt6-base-dev \
-            qt6-svg-dev \
-            libqscintilla2-qt6-dev \
-            libdbus-1-dev \
-            libsecret-1-dev \
-            libgl1-mesa-dev \
-            libxkbcommon-dev
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: rust/spell_core
-          cache-on-failure: true
-
-      - name: Verify third-party license notices
-        run: python3 scripts/generate_third_party_licenses.py --check
-
-      - name: Build, install, test, and verify loader
-        run: ./scripts/build_and_run.sh --install dist --test --verify-loader
-
-      - name: Create Linux tar.gz archive
-        run: |
-          cp -a dist BeatrixLeslieIDE-linux-x86_64
-          tar -czf BeatrixLeslieIDE-linux-x86_64.tar.gz BeatrixLeslieIDE-linux-x86_64
-
-      - name: Upload Linux archive
-        uses: actions/upload-artifact@v4
-        with:
-          name: BeatrixLeslieIDE-linux-x86_64
-          path: BeatrixLeslieIDE-linux-x86_64.tar.gz
-          if-no-files-found: error
-
-  windows:
-    name: Package Windows (x86_64)
-    runs-on: windows-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.tag || github.ref }}
-
-      - name: Configure MSVC developer command prompt
-        uses: ilammy/msvc-dev-cmd@v1
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-pc-windows-msvc
-
-      - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: rust/spell_core
-          cache-on-failure: true
-
-      - name: Install Qt 6
-        uses: jurplel/install-qt-action@v4
-        with:
-          version: '6.7.*'
-          cache: true
-
-      - name: Cache QScintilla 2.14.1 (Windows MSVC)
-        id: qsci-cache
-        uses: actions/cache@v4
-        with:
-          path: C:\qscintilla-cache
-          key: qscintilla-2.14.1-qt6.7-msvc-x64-v1
-
-      - name: Build and install QScintilla 2.14.1
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $CacheDir = "C:\qscintilla-cache"
-          $QtLibDir = (& qmake -query QT_INSTALL_LIBS).Trim()
-          $QtBinDir = (& qmake -query QT_INSTALL_BINS).Trim()
-          $QtIncDir = (& qmake -query QT_INSTALL_HEADERS).Trim()
-
-          if ("${{ steps.qsci-cache.outputs.cache-hit }}" -eq "true" -and
-              (Test-Path -LiteralPath (Join-Path $CacheDir "qscintilla2_qt6.lib")) -and
-              (Test-Path -LiteralPath (Join-Path $CacheDir "qscintilla2_qt6.dll")) -and
-              (Test-Path -LiteralPath (Join-Path $CacheDir "Qsci\qsciscintilla.h"))) {
-              Write-Host "==> Restoring prebuilt QScintilla 2.14.1 from cache"
-              Copy-Item -LiteralPath (Join-Path $CacheDir "qscintilla2_qt6.lib") -Destination (Join-Path $QtLibDir "qscintilla2_qt6.lib") -Force
-              Copy-Item -LiteralPath (Join-Path $CacheDir "qscintilla2_qt6.dll") -Destination (Join-Path $QtLibDir "qscintilla2_qt6.dll") -Force
-              Copy-Item -LiteralPath (Join-Path $CacheDir "qscintilla2_qt6.dll") -Destination (Join-Path $QtBinDir "qscintilla2_qt6.dll") -Force
-              Copy-Item -LiteralPath (Join-Path $CacheDir "Qsci") -Destination $QtIncDir -Recurse -Force
-              exit 0
-          }
-
-          $ExpectedSha256 = "dfe13c6acc9d85dfcba76ccc8061e71a223957a6c02f3c343b30a9d43a4cdd4d"
-          $Urls = @(
-              "https://www.riverbankcomputing.com/static/Downloads/QScintilla/2.14.1/QScintilla_src-2.14.1.tar.gz",
-              "https://files.pythonhosted.org/packages/a9/f6/a7aa4b495dcee4c521b87205de9363fb62ee5fdc8eab91d4ddb97257c85b/QScintilla-2.14.1.tar.gz"
-          )
-          $WorkDir = Join-Path $env:RUNNER_TEMP "qscintilla-build"
-          if (Test-Path -LiteralPath $WorkDir) {
-              Remove-Item -LiteralPath $WorkDir -Recurse -Force
-          }
-          New-Item -ItemType Directory -Path $WorkDir -Force | Out-Null
-          $TarPath = Join-Path $WorkDir "QScintilla_src-2.14.1.tar.gz"
-
-          $Downloaded = $false
-          foreach ($CandUrl in $Urls) {
-              Write-Host "==> Downloading QScintilla 2.14.1 from $CandUrl"
-              & curl.exe --fail --location --retry 3 --retry-delay 2 -o $TarPath $CandUrl
-              if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $TarPath)) {
-                  $Downloaded = $true
-                  break
-              }
-          }
-          if (-not $Downloaded) {
-              throw "Failed to download QScintilla 2.14.1 archive."
-          }
-
-          $ActualSha256 = (Get-FileHash -LiteralPath $TarPath -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($CandUrl -like "*QScintilla_src-2.14.1.tar.gz" -and $ActualSha256 -ne $ExpectedSha256) {
-              throw "SHA256 mismatch for QScintilla_src-2.14.1.tar.gz: expected $ExpectedSha256, got $ActualSha256"
-          }
-
-          & tar -xzf $TarPath -C $WorkDir
-          if ($LASTEXITCODE -ne 0) {
-              exit $LASTEXITCODE
-          }
-
-          $SrcDirCand = Get-ChildItem -Path $WorkDir -Directory | Select-Object -First 1
-          $QsciSrcDir = Join-Path $SrcDirCand.FullName "src"
-
-          Push-Location $QsciSrcDir
-          try {
-              & qmake "CONFIG+=release" "CONFIG-=debug_and_release" "QMAKE_CXXFLAGS+=/MP" qscintilla.pro
-              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-              & nmake
-              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-              & nmake install
-              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-              New-Item -ItemType Directory -Path $CacheDir -Force | Out-Null
-              Copy-Item -LiteralPath (Join-Path $QsciSrcDir "Qsci") -Destination $CacheDir -Recurse -Force
-
-              foreach ($BuiltLib in @(Get-ChildItem -Path $QsciSrcDir -Recurse -Filter "qscintilla2_qt6.lib" -File -ErrorAction SilentlyContinue)) {
-                  if ($QtLibDir -and (Test-Path -LiteralPath $QtLibDir)) {
-                      Copy-Item -LiteralPath $BuiltLib.FullName -Destination (Join-Path $QtLibDir "qscintilla2_qt6.lib") -Force
-                  }
-                  Copy-Item -LiteralPath $BuiltLib.FullName -Destination (Join-Path $CacheDir "qscintilla2_qt6.lib") -Force
-              }
-              foreach ($BuiltDll in @(Get-ChildItem -Path $QsciSrcDir -Recurse -Filter "qscintilla2_qt6.dll" -File -ErrorAction SilentlyContinue)) {
-                  if ($QtLibDir -and (Test-Path -LiteralPath $QtLibDir)) {
-                      Copy-Item -LiteralPath $BuiltDll.FullName -Destination (Join-Path $QtLibDir "qscintilla2_qt6.dll") -Force
-                  }
-                  if ($QtBinDir -and (Test-Path -LiteralPath $QtBinDir)) {
-                      Copy-Item -LiteralPath $BuiltDll.FullName -Destination (Join-Path $QtBinDir "qscintilla2_qt6.dll") -Force
-                  }
-                  Copy-Item -LiteralPath $BuiltDll.FullName -Destination (Join-Path $CacheDir "qscintilla2_qt6.dll") -Force
-              }
-          } finally {
-              Pop-Location
-          }
-
-          if ($QtLibDir -and $QtBinDir) {
-              $LibDll = Join-Path $QtLibDir "qscintilla2_qt6.dll"
-              if ((Test-Path -LiteralPath $LibDll) -and (Test-Path -LiteralPath $QtBinDir)) {
-                  Copy-Item -LiteralPath $LibDll -Destination (Join-Path $QtBinDir "qscintilla2_qt6.dll") -Force
-              }
-          }
-
-      - name: Verify third-party license notices
-        shell: pwsh
-        run: |
-          & python scripts/generate_third_party_licenses.py --check
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      - name: Build, deploy Qt, test, and verify loader
-        shell: pwsh
-        run: .\scripts\build_and_run.ps1 -InstallPrefix dist -DeployQt -Test -VerifyLoader
-
-      - name: Create Windows zip archive
-        shell: pwsh
-        run: |
-          Compress-Archive -Path "dist\bin\*" -DestinationPath "BeatrixLeslieIDE-windows-x86_64.zip" -Force
-
-      - name: Upload Windows archive
-        uses: actions/upload-artifact@v4
-        with:
-          name: BeatrixLeslieIDE-windows-x86_64
-          path: BeatrixLeslieIDE-windows-x86_64.zip
-          if-no-files-found: error
+  build:
+    name: Build & Package
+    uses: ./.github/workflows/_build.yml
+    with:
+      checkout_ref: ${{ inputs.tag || github.ref }}
+      package_artifacts: true
+    secrets: inherit
 
   publish:
     name: Publish Release & Checksums
     runs-on: ubuntu-24.04
     needs:
-      - macos
-      - linux
-      - windows
+      - build
     steps:
       - name: Download platform archives
         uses: actions/download-artifact@v4
@@ -286,6 +44,8 @@ jobs:
           cd release-assets
           sha256sum \
             BeatrixLeslieIDE-macos-arm64.zip \
+            BeatrixLeslieIDE-macos-x86_64.zip \
+            BeatrixLeslieIDE-linux-x86_64.AppImage \
             BeatrixLeslieIDE-linux-x86_64.tar.gz \
             BeatrixLeslieIDE-windows-x86_64.zip \
             > SHA256SUMS.txt
@@ -306,6 +66,8 @@ jobs:
           generate_release_notes: true
           files: |
             release-assets/BeatrixLeslieIDE-macos-arm64.zip
+            release-assets/BeatrixLeslieIDE-macos-x86_64.zip
+            release-assets/BeatrixLeslieIDE-linux-x86_64.AppImage
             release-assets/BeatrixLeslieIDE-linux-x86_64.tar.gz
             release-assets/BeatrixLeslieIDE-windows-x86_64.zip
             release-assets/SHA256SUMS.txt

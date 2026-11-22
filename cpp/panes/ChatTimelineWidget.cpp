@@ -573,8 +573,8 @@ struct DelegationPanel {
             fr.pathButton->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
             const QString rawPathCopy = file.path;
             QObject::connect(fr.pathButton, &QPushButton::clicked, fr.pathButton,
-                             [alive = alive, this, rawPathCopy]() {
-                                 if (!*alive || !onOpenFile) {
+                             [aliveFlag = alive, this, rawPathCopy]() {
+                                 if (!*aliveFlag || !onOpenFile) {
                                      return;
                                  }
                                  onOpenFile(resolveWorkspacePath(rawPathCopy, projectRoots), 0);

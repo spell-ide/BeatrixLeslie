@@ -23,18 +23,15 @@
 //!   and renders declarations, parameters, code listings, and topic sections into clean Markdown.
 
 use std::collections::{BTreeSet, HashMap};
-use std::ffi::{c_void, CStr, CString};
-use std::fs;
-use std::os::raw::c_char;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use once_cell::sync::Lazy;
-use parking_lot::Mutex;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
+
+use crate::storage::{now_unix_secs, sql_escape, RawSqliteStore, SqlRow};
 
 use super::{
     HttpsFetcher, OnlineFetchError, OnlineFetchOutcome, OnlineResearchConfig, OnlineResearchMode,
@@ -60,106 +57,8 @@ pub const FEDERATED_SEARCH_TIER_BADGE: &str = "Federated Search · RRF";
 pub const APPLE_DOCC_TIER_BADGE: &str = "Apple Swift-DocC JSON";
 
 // ============================================================================
-// SQLite3 FFI & WAL + FTS5 Search Cache (`<cache_dir>/search_cache.sqlite3`)
+// SQLite3 WAL + FTS5 Search Cache (`<cache_dir>/search_cache.sqlite3`)
 // ============================================================================
-
-#[link(name = "sqlite3")]
-extern "C" {
-    fn sqlite3_open(filename: *const c_char, ppDb: *mut *mut c_void) -> i32;
-    fn sqlite3_close(db: *mut c_void) -> i32;
-    fn sqlite3_busy_timeout(db: *mut c_void, ms: i32) -> i32;
-    fn sqlite3_exec(
-        db: *mut c_void,
-        sql: *const c_char,
-        callback: Option<
-            extern "C" fn(*mut c_void, i32, *mut *mut c_char, *mut *mut c_char) -> i32,
-        >,
-        arg: *mut c_void,
-        errmsg: *mut *mut c_char,
-    ) -> i32;
-    fn sqlite3_free(ptr: *mut c_void);
-}
-
-const SQLITE_OK: i32 = 0;
-
-type SqlRow = Vec<(String, String)>;
-
-extern "C" fn collect_sql_rows_cb(
-    arg: *mut c_void,
-    argc: i32,
-    argv: *mut *mut c_char,
-    col_names: *mut *mut c_char,
-) -> i32 {
-    if arg.is_null() || argc <= 0 {
-        return 0;
-    }
-    unsafe {
-        let rows = &mut *(arg as *mut Vec<SqlRow>);
-        let count = argc as usize;
-        let mut row = Vec::with_capacity(count);
-        for i in 0..count {
-            let name_ptr = if col_names.is_null() {
-                std::ptr::null_mut()
-            } else {
-                *col_names.add(i)
-            };
-            let val_ptr = if argv.is_null() {
-                std::ptr::null_mut()
-            } else {
-                *argv.add(i)
-            };
-            let col_name = if name_ptr.is_null() {
-                String::new()
-            } else {
-                CStr::from_ptr(name_ptr).to_string_lossy().into_owned()
-            };
-            let col_val = if val_ptr.is_null() {
-                String::new()
-            } else {
-                CStr::from_ptr(val_ptr).to_string_lossy().into_owned()
-            };
-            row.push((col_name, col_val));
-        }
-        rows.push(row);
-    }
-    0
-}
-
-struct RawSqliteDb {
-    ptr: *mut c_void,
-}
-
-unsafe impl Send for RawSqliteDb {}
-
-impl Drop for RawSqliteDb {
-    fn drop(&mut self) {
-        if !self.ptr.is_null() {
-            unsafe {
-                let _ = sqlite3_close(self.ptr);
-            }
-            self.ptr = std::ptr::null_mut();
-        }
-    }
-}
-
-fn sql_escape(input: &str) -> String {
-    let mut out = String::with_capacity(input.len() + 8);
-    for ch in input.chars() {
-        if ch == '\'' {
-            out.push_str("''");
-        } else if ch != '\0' {
-            out.push(ch);
-        }
-    }
-    out
-}
-
-fn now_unix_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
 
 /// Persisted payload inside `search_query_cache.hits_json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -189,7 +88,7 @@ pub struct OfflineCachedHit {
 
 /// SQLite3 WAL + FTS5 cache backing `search_cache.sqlite3`.
 pub struct SearchSqliteCache {
-    conn: Mutex<RawSqliteDb>,
+    store: RawSqliteStore,
     db_path: PathBuf,
     fts5_enabled: bool,
 }
@@ -207,33 +106,9 @@ impl SearchSqliteCache {
     }
 
     fn open_internal(db_path: &Path, force_disable_fts5: bool) -> Result<Self, String> {
-        let target = db_path.to_string_lossy().into_owned();
-        if target != ":memory:" {
-            if let Some(parent) = db_path.parent() {
-                if !parent.as_os_str().is_empty() {
-                    fs::create_dir_all(parent)
-                        .map_err(|e| format!("Failed creating cache dir '{}': {e}", parent.display()))?;
-                }
-            }
-        }
-        let c_path = CString::new(target.clone())
-            .map_err(|e| format!("Invalid SQLite path '{target}': {e}"))?;
-        let mut raw_db: *mut c_void = std::ptr::null_mut();
-        let rc = unsafe { sqlite3_open(c_path.as_ptr(), &mut raw_db) };
-        if rc != SQLITE_OK || raw_db.is_null() {
-            if !raw_db.is_null() {
-                unsafe {
-                    let _ = sqlite3_close(raw_db);
-                }
-            }
-            return Err(format!("sqlite3_open failed for '{target}' (rc={rc})"));
-        }
-        unsafe {
-            let _ = sqlite3_busy_timeout(raw_db, 3_000);
-        }
-
+        let store = RawSqliteStore::open(db_path, Some(3_000))?;
         let mut cache = Self {
-            conn: Mutex::new(RawSqliteDb { ptr: raw_db }),
+            store,
             db_path: db_path.to_path_buf(),
             fts5_enabled: false,
         };
@@ -259,41 +134,7 @@ impl SearchSqliteCache {
     }
 
     fn exec_sql(&self, sql: &str) -> Result<Vec<SqlRow>, String> {
-        let guard = self.conn.lock();
-        if guard.ptr.is_null() {
-            return Err("SQLite search cache connection closed".to_string());
-        }
-        let cleaned = sql.replace('\0', "");
-        let c_sql = CString::new(cleaned).map_err(|e| format!("Invalid SQL: {e}"))?;
-        let mut rows: Vec<SqlRow> = Vec::new();
-        let mut errmsg: *mut c_char = std::ptr::null_mut();
-        let rc = unsafe {
-            sqlite3_exec(
-                guard.ptr,
-                c_sql.as_ptr(),
-                Some(collect_sql_rows_cb),
-                (&mut rows as *mut Vec<SqlRow>) as *mut c_void,
-                &mut errmsg,
-            )
-        };
-        if rc != SQLITE_OK {
-            let msg = if !errmsg.is_null() {
-                let s = unsafe { CStr::from_ptr(errmsg).to_string_lossy().into_owned() };
-                unsafe {
-                    sqlite3_free(errmsg as *mut c_void);
-                }
-                s
-            } else {
-                format!("SQLite error rc={rc}")
-            };
-            return Err(msg);
-        }
-        if !errmsg.is_null() {
-            unsafe {
-                sqlite3_free(errmsg as *mut c_void);
-            }
-        }
-        Ok(rows)
+        self.store.execute_sql(sql)
     }
 
     fn row_col<'a>(row: &'a SqlRow, name: &str) -> Option<&'a str> {
@@ -3937,8 +3778,11 @@ pub fn try_fetch_structured_doc_url(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use parking_lot::Mutex;
     use std::collections::BTreeMap;
+    use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     type RouteHandler = Box<dyn Fn(&OutboundHttpRequest) -> Result<OutboundHttpResponse, OnlineFetchError> + Send + Sync>;
 

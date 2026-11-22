@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=BeatrixLeslie IDE
+Comment=Native C++20, Qt 6, and Rust agentic IDE for OpenAI-compatible endpoints
+Exec=BeatrixLeslieIDE %F
+Icon=com.spell.BeatrixLeslieIDE
+Terminal=false
+Categories=Development;IDE;TextEditor;
+StartupWMClass=BeatrixLeslieIDE
+StartupNotify=true

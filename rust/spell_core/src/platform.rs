@@ -417,17 +417,29 @@ fn format_lopdf_error(path: &Path, err: &lopdf::Error) -> String {
                 path.display()
             )
         }
-        lopdf::Error::Header
-        | lopdf::Error::Trailer
-        | lopdf::Error::Xref(_)
-        | lopdf::Error::Parse { .. }
+        lopdf::Error::InvalidPassword | lopdf::Error::UnsupportedSecurityHandler(_) => {
+            format!(
+                "PDF '{}' is encrypted and cannot be decrypted: {err}",
+                path.display()
+            )
+        }
+        lopdf::Error::Xref(_)
+        | lopdf::Error::MissingXrefEntry
+        | lopdf::Error::Parse(_)
         | lopdf::Error::Syntax(_)
-        | lopdf::Error::Offset(_)
-        | lopdf::Error::Type
-        | lopdf::Error::ObjectNotFound
+        | lopdf::Error::InvalidOffset(_)
+        | lopdf::Error::IndirectObject { .. }
+        | lopdf::Error::InvalidStream(_)
+        | lopdf::Error::InvalidObjectStream(_)
+        | lopdf::Error::Decompress(_)
+        | lopdf::Error::ObjectType { .. }
+        | lopdf::Error::DictType { .. }
+        | lopdf::Error::DictKey(_)
+        | lopdf::Error::ObjectNotFound(_)
         | lopdf::Error::ObjectIdMismatch
-        | lopdf::Error::ReferenceCycle
-        | lopdf::Error::ReferenceLimit => {
+        | lopdf::Error::ReferenceCycle(_)
+        | lopdf::Error::ReferenceLimit
+        | lopdf::Error::RecursionLimit => {
             format!("Corrupt or invalid PDF '{}': {err}", path.display())
         }
         other => format!("Failed to load PDF '{}': {other}", path.display()),

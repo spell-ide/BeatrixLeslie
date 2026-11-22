@@ -76,7 +76,7 @@ impl SimulatedEngineThreadState {
     }
 }
 
-/// Scripted multi-step subagent turn step queued on [`FixtureTransport`] for Option A / Option B tests.
+/// Scripted multi-step subagent turn step queued on [`FixtureTransport`] for subagent protocol tests.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ScriptedSubagentStep {
     pub content: String,
@@ -1051,7 +1051,7 @@ impl EngineTransport for FixtureTransport {
             guard.next_turn_seq += 1;
             let turn_seq = guard.next_turn_seq;
 
-            // 1. Decision 2: Engine-Owned Timer Delivery (`inject_due_agent_timers_at_end`)
+            // 1. Engine-Owned Timer Delivery (`inject_due_agent_timers_at_end`)
             // Pop due timers for `thread_key` or `"*"` and append banners to `req.messages.last_mut()`
             // without touching `req.messages[0]`!
             let is_aux_slot =
@@ -1145,7 +1145,7 @@ impl EngineTransport for FixtureTransport {
             let tokens_exceeded = estimated_tokens >= ENGINE_INTERCEPTOR_COMPACT_TOKENS;
             let tps_below = state.decode_tok_s > 0.0 && state.decode_tok_s < min_tps;
 
-            // 2. Decision 3: Engine-Owned In-Flight Compaction & Hot-Cache Clear
+            // 2. Engine-Owned In-Flight Compaction & Hot-Cache Clear
             let mut compaction_reason = "healthy".to_string();
             let mut compaction_action = "ok".to_string();
 
@@ -2258,7 +2258,7 @@ impl Drop for LoopbackVerifyServer {
 static UNIX_VERIFY_SEQ: AtomicU64 = AtomicU64::new(1);
 
 /// Ephemeral `AF_UNIX` (`std::os::unix::net::UnixListener`) HTTP/1.1 + SSE server wrapping
-/// `Arc<FixtureTransport>` for air-gapped IPC verification (`G7`).
+/// `Arc<FixtureTransport>` for air-gapped IPC verification.
 #[cfg(unix)]
 pub struct UnixVerifyServer {
     socket_path: PathBuf,

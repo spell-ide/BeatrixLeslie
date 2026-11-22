@@ -9,27 +9,28 @@
 
 ## Verification
 
+CI enforces zero warnings across C++ (`-Wall -Wextra -Werror` on Clang/GCC, `/W4 /WX` on MSVC) and Rust (`RUSTFLAGS="-D warnings"`), third-party notice freshness, and `cargo-deny` policy checks.
+
 Every pull request must pass before review:
 
 ```bash
-SPELL_EPHEMERAL_KEYRING=1 cargo test --manifest-path rust/spell_core/Cargo.toml
 python3 scripts/generate_third_party_licenses.py --check
-./scripts/build_and_run.sh --install dist --test --verify-loader
+cargo deny --manifest-path rust/spell_core/Cargo.toml check advisories bans licenses sources
+./scripts/build_and_run.sh --strict-warnings --install dist --deploy-qt --test --verify-loader
 ```
 
-On macOS, also verify self-contained bundle deployment:
-
-```bash
-./scripts/build_and_run.sh --install dist --deploy-qt --test --verify-loader
-```
-
-On Windows:
+On Windows (from Visual Studio 2022 Developer PowerShell with Qt 6 `bin` on `PATH`):
 
 ```powershell
-.\scripts\build_and_run.ps1 -InstallPrefix dist -DeployQt -Test -VerifyLoader
+.\scripts\install_qscintilla_windows.ps1
+.\scripts\build_and_run.ps1 -StrictWarnings -InstallPrefix dist -DeployQt -Test -VerifyLoader
 ```
 
-Builds must complete with zero compiler warnings across C++ and Rust. If Cargo dependencies change, regenerate third-party notices with `python3 scripts/generate_third_party_licenses.py`.
+Use `--no-werror` (or `-NoWerror` on Windows) only for local toolchain troubleshooting; pull requests must compile cleanly with `--strict-warnings` / `-StrictWarnings`. If Cargo dependencies change, regenerate third-party notices with `python3 scripts/generate_third_party_licenses.py`.
+
+## Conduct & Security
+
+Participation is governed by [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md). Report security vulnerabilities privately per [`SECURITY.md`](SECURITY.md).
 
 ## Licensing
 

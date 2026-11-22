@@ -779,7 +779,7 @@ void SpellSettingsStore::fetchSecret(const QString& account, std::function<void(
                 } else {
                     const QString previous = weakSelf->m_impl->secretCache.value(key);
                     if (trimmed.isEmpty()) {
-                        if (weakSelf->m_impl->secretCache.remove(key) > 0) {
+                        if (weakSelf->m_impl->secretCache.remove(key)) {
                             changed = true;
                         }
                     } else if (previous != trimmed) {
@@ -1187,7 +1187,7 @@ QString SpellSettingsStore::exportDiagnosticsBundle(const WorkspaceSnapshot& sna
 
     const QJsonObject summaryObj{
         {QStringLiteral("app"), QStringLiteral("BeatrixLeslie IDE")},
-        {QStringLiteral("bundle_id"), QStringLiteral("com.spell.SpellIDE")},
+        {QStringLiteral("bundle_id"), QStringLiteral("com.spell.BeatrixLeslieIDE")},
         {QStringLiteral("version"), appVersion},
         {QStringLiteral("timestamp_utc"), nowUtc.toString(Qt::ISODateWithMs)},
         {QStringLiteral("log_file_path"), currentLogPath},

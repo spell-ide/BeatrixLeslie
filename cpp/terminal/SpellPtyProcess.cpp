@@ -1075,7 +1075,7 @@ bool SpellPtyProcess::start(const QString& workingDirectory,
 
         if (!cwdUtf8.empty() && ::chdir(cwdUtf8.c_str()) != 0) {
             if (!homeUtf8.empty()) {
-                (void)::chdir(homeUtf8.c_str());
+                if (::chdir(homeUtf8.c_str()) != 0) {}
             }
         }
 
@@ -1505,7 +1505,7 @@ QProcessEnvironment SpellPtyProcess::buildSanitizedEnvironment(const QProcessEnv
     const QString appVersion = QCoreApplication::applicationVersion().trimmed();
     sanitized.insert(
         QStringLiteral("TERM_PROGRAM_VERSION"),
-        appVersion.isEmpty() ? QStringLiteral("2.0") : appVersion);
+        appVersion.isEmpty() ? QStringLiteral("1.0.0") : appVersion);
 
 #ifndef _WIN32
     if (!sanitized.contains(QStringLiteral("LANG"))

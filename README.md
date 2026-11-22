@@ -1,59 +1,86 @@
-# BeatrixLeslie IDE
-
-A native agentic IDE. C++20, Qt 6, QScintilla2, Rust. No Electron. No telemetry. No bundled models. No vendor lock-in.
+# BeatrixLeslie IDE - Product Documentation
 
 ![BeatrixLeslie IDE](docs/screenshot.png)
 
-BeatrixLeslie IDE speaks the OpenAI wire protocol and nothing else. Point it at any `/v1` endpoint — local or remote — and it works. Your keys live in the OS keychain. Your code never leaves your machine unless you send it.
+## Overview
 
-- **Three panes.** Projects and conversations. Editor. Agent.
-- **Ask or Write.** Ask is read-only. Write edits, runs, and verifies.
-- **Stage-Write.** Every change is a diff. You approve it or it does not land.
-- **Gatekeeper Critic.** A second pass rejects bad edits before you see them.
-- **Subagents.** Bounded parallel coding work, committed or escalated.
-- **Timers.** Local, persistent, SQLite-backed.
+BeatrixLeslie IDE implements the OpenAI wire protocol exclusively. Connect it to any `/v1` endpoint - local or remote - and it functions seamlessly. API keys reside in the OS keychain. Your code never leaves your machine unless you explicitly transmit it.
 
----
+## Architecture
 
-## `#spell`
+Three Panes:
 
-`#spell` hands the terminal to the agent.
+1. Projects & Conversations - Organize work and dialogue history
+2. Editor - Code editing and review
+3. Agent - Autonomous assistance
 
-Work in the integrated Message Terminal. When something breaks, type:
+Two Modes:
 
+- Ask - Read-only inspection and analysis
+- Write - Edit, run, and verify changes
+
+## Workflow
+
+Stage-Write Protocol:
+
+- Every change produces a diff
+- Changes require explicit approval before landing
+- No unapproved modifications reach the working tree
+
+Gatekeeper Critic:
+
+- A second-pass review rejects defective edits
+- Bad changes are blocked before user visibility
+
+Subagents:
+
+- Bounded parallel coding tasks
+- Work is either committed or escalated for review
+
+Timers:
+
+- Local, persistent, SQLite-backed scheduling
+- Supports asynchronous job monitoring
+
+## Message Terminal Integration
+
+The IDE hands the terminal directly to the agent. When failures occur:
+
+```text
+why did this fail?
 ```
-#spell why did this fail?
-```
 
-The working directory and recent output are attached. The agent picks it up from there. No copy. No paste. No context lost.
+The working directory and recent output are attached contextually. The agent resumes from that state - no copy, no paste, no context loss.
 
----
-
-## Install
+## Installation
 
 ### Downloads
 
-Prebuilt archives and `SHA256SUMS.txt` are published on [GitHub Releases](https://github.com/spell-ide/BeatrixLeslie/releases):
+Prebuilt archives with SHA256 verification are published on [GitHub Releases](https://github.com/spell-ide/BeatrixLeslie/releases):
 
 | Platform | Artifact |
 | :-- | :-- |
 | macOS 14+ (Apple Silicon) | `BeatrixLeslieIDE-macos-arm64.zip` |
 | macOS 14+ (Intel) | `BeatrixLeslieIDE-macos-x86_64.zip` |
 | Linux x86_64 (AppImage) | `BeatrixLeslieIDE-linux-x86_64.AppImage` |
-| Linux x86_64 (Portable archive) | `BeatrixLeslieIDE-linux-x86_64.tar.gz` |
+| Linux x86_64 (Portable) | `BeatrixLeslieIDE-linux-x86_64.tar.gz` |
 | Windows 10/11 x86_64 | `BeatrixLeslieIDE-windows-x86_64.zip` |
 
-Verify. Then run.
+Verification:
 
 ```bash
 shasum -a 256 -c SHA256SUMS.txt --ignore-missing
 ```
 
-- **macOS:** Signed and notarized. Unzip. Drag to Applications. Open.
-- **Linux:** `chmod +x BeatrixLeslieIDE-linux-x86_64.AppImage && ./BeatrixLeslieIDE-linux-x86_64.AppImage`
-- **Windows:** Unsigned. SmartScreen → **More info** → **Run anyway**.
+### Platform-Specific Installation
 
-### Requirements
+| Platform | Instructions |
+| :-- | :-- |
+| macOS | Signed and notarized. Unzip > Drag to Applications > Open |
+| Linux | `chmod +x BeatrixLeslieIDE-linux-x86_64.AppImage && ./BeatrixLeslieIDE-linux-x86_64.AppImage` |
+| Windows | Unsigned. SmartScreen > More info > Run anyway |
+
+## Requirements
 
 | Platform | Toolchain |
 | :-- | :-- |
@@ -63,9 +90,11 @@ shasum -a 256 -c SHA256SUMS.txt --ignore-missing
 | Arch | `base-devel cmake ninja pkgconf patchelf file qt6-base qt6-svg qt6-wayland qscintilla-qt6 dbus libsecret`, Rust |
 | Windows 10/11 | Visual Studio 2022 (C++), Rust (MSVC), Qt 6.7+ (`msvc2019_64` / `msvc2022_64` on `PATH`), `.\scripts\install_qscintilla_windows.ps1` |
 
-Rust: https://rustup.rs
+Rust: [https://rustup.rs](https://rustup.rs)
 
-### Build
+## Build Process
+
+### Standard Build
 
 ```bash
 git clone https://github.com/spell-ide/BeatrixLeslie.git
@@ -73,13 +102,13 @@ cd BeatrixLeslie
 ./scripts/build_and_run.sh --test --verify-loader --run
 ```
 
-macOS self-contained `.app`:
+### macOS Self-Contained .app
 
 ```bash
 ./scripts/build_and_run.sh --install dist --deploy-qt --test --verify-loader
 ```
 
-Sign and notarize your own build. Developer ID plus an App Store Connect API key. No passwords.
+Signing & Notarization:
 
 ```bash
 ./scripts/build_and_run.sh --install dist --deploy-qt \
@@ -87,20 +116,21 @@ Sign and notarize your own build. Developer ID plus an App Store Connect API key
   --notary-key AuthKey_<KEYID>.p8 --notary-key-id <KEYID> --notary-issuer <ISSUER-UUID>
 ```
 
-Linux self-contained bundle and AppImage:
+### Linux Self-Contained Bundle & AppImage
 
 ```bash
-./scripts/build_and_run.sh --install dist --deploy-qt --test --verify-loader --package-appimage BeatrixLeslieIDE-linux-x86_64.AppImage
+./scripts/build_and_run.sh --install dist --deploy-qt --test --verify-loader \
+  --package-appimage BeatrixLeslieIDE-linux-x86_64.AppImage
 ```
 
-Windows (from Visual Studio 2022 Developer PowerShell with Qt 6 `bin` on `PATH`):
+### Windows (Visual Studio 2022 Developer PowerShell)
 
 ```powershell
 .\scripts\install_qscintilla_windows.ps1
 .\scripts\build_and_run.ps1 -InstallPrefix dist -DeployQt -Test -VerifyLoader -Run
 ```
 
-Manual:
+### Manual Build
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -111,11 +141,15 @@ cmake --install build --prefix dist
 
 The Rust core builds automatically.
 
----
-
 ## Setup
 
-Open **Settings → Engine**. Enter a base URL. Fetch models. Pick one. Save.
+1. Open Settings > Engine
+2. Enter a base URL
+3. Fetch available models
+4. Select a model
+5. Save configuration
+
+### Supported Endpoints
 
 | Endpoint | Base URL |
 | :-- | :-- |
@@ -125,18 +159,14 @@ Open **Settings → Engine**. Enter a base URL. Fetch models. Pick one. Save.
 | OpenAI | `https://api.openai.com/v1` |
 | OpenRouter | `https://openrouter.ai/api/v1` |
 
-API keys go in the OS keychain. Nothing is written to disk in plaintext. Until an endpoint is saved, the IDE makes zero network requests.
-
----
+Security: API keys stored in OS keychain. No plaintext disk storage. No network requests until an endpoint is explicitly saved.
 
 ## Contributing & Security
 
-See [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`SECURITY.md`](SECURITY.md).
-
----
+Refer to [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md) for guidelines.
 
 ## License
 
-Application: `GPL-3.0-only`. See [`LICENSE`](LICENSE).
-`rust/spell_core`: `MIT OR Apache-2.0`.
-Third-party: [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+- Application: GPL-3.0-only (see [LICENSE](LICENSE))
+- Rust Core ([rust/spell_core](rust/spell_core)): MIT OR Apache-2.0
+- Third-Party Dependencies: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)

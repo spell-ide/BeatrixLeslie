@@ -630,7 +630,25 @@ impl McpStdioClient {
         _deny_ip_network: bool,
     ) -> Result<Self, String> {
         let mut cmd = Command::new(program);
-        cmd.args(args);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            if (program.eq_ignore_ascii_case("cmd") || program.eq_ignore_ascii_case("cmd.exe"))
+                && args.len() == 2
+                && (args[0].eq_ignore_ascii_case("/C") || args[0].eq_ignore_ascii_case("/K"))
+            {
+                cmd.arg("/D")
+                    .arg("/S")
+                    .arg(args[0])
+                    .raw_arg(format!("\"{}\"", args[1]));
+            } else {
+                cmd.args(args);
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            cmd.args(args);
+        }
 
         for env_key in SCRUBBED_SENSITIVE_ENV_VARS {
             cmd.env_remove(env_key);
@@ -2532,8 +2550,14 @@ mod tests {
             McpStdioClient::spawn_sandboxed("cmd", &["/C", &cmd_str], &[], true).unwrap()
         };
 
-        // Wait briefly for the child to exit 71
-        thread::sleep(Duration::from_millis(80));
+        // Wait for the child to write its single side-effect line and exit 71
+        for _ in 0..50 {
+            if side_effect_path.exists() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        thread::sleep(Duration::from_millis(60));
         drop(client);
 
         let content = fs::read_to_string(&side_effect_path).unwrap();

@@ -743,6 +743,7 @@ pub fn create_git_loop_snapshot(
     step_num: u64,
 ) -> Result<String, String> {
     let stash_out = Command::new("git")
+        .args(["-c", "core.autocrlf=false"])
         .arg("-C")
         .arg(project_root)
         .arg("stash")
@@ -826,6 +827,7 @@ pub fn rollback_to_git_loop_snapshot(
     }
 
     let checkout_out = Command::new("git")
+        .args(["-c", "core.autocrlf=false"])
         .arg("-C")
         .arg(project_root)
         .arg("checkout")
@@ -5029,8 +5031,8 @@ impl SpellCoreSession {
                     continue;
                 }
                 let p = resolve_workspace_path(project_root, raw)
-                    .map(|r| r.to_string_lossy().to_string())
-                    .unwrap_or_else(|_| raw.to_string());
+                    .map(|r| r.to_string_lossy().replace('\\', "/"))
+                    .unwrap_or_else(|_| raw.replace('\\', "/"));
                 if !out.contains(&p) {
                     out.push(p);
                 }
@@ -5097,7 +5099,10 @@ impl SpellCoreSession {
             .filter(|e| thread_id.map(|t| e.thread_id == t).unwrap_or(true))
             .filter(|e| {
                 path_contains
-                    .map(|needle| e.paths.iter().any(|p| p.contains(needle)))
+                    .map(|needle| {
+                        let norm = needle.replace('\\', "/");
+                        e.paths.iter().any(|p| p.contains(&norm))
+                    })
                     .unwrap_or(true)
             })
             .collect();
@@ -11702,6 +11707,7 @@ mod tests {
         };
 
         run_git(&["init"]);
+        run_git(&["config", "core.autocrlf", "false"]);
         run_git(&["config", "user.email", "dev@example.com"]);
         run_git(&["config", "user.name", "Spell Loop Test"]);
 

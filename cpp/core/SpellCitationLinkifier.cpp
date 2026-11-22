@@ -6,6 +6,7 @@
 #include <QSet>
 #include <QStringView>
 #include <QUrlQuery>
+#include <QtGlobal>
 
 #include <algorithm>
 #include <utility>
@@ -234,7 +235,11 @@ bool isInsideUrl(const QString& text, qsizetype matchStart) {
 
     static const QRegularExpression kSchemeColonSlash(
         QStringLiteral(R"((?:^|[^A-Za-z0-9+.\-])[A-Za-z][A-Za-z0-9+.\-]{1,23}:/)"));
+#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
     if (kSchemeColonSlash.matchView(activePrefix).hasMatch()) {
+#else
+    if (kSchemeColonSlash.match(activePrefix).hasMatch()) {
+#endif
         return true;
     }
 
@@ -242,7 +247,11 @@ bool isInsideUrl(const QString& text, qsizetype matchStart) {
         static const QRegularExpression kOpaqueScheme(
             QStringLiteral(R"((?:^|[^A-Za-z0-9+.\-])(?:mailto|data|javascript|vbscript|about|tel|urn|blob|file|spellfile):$)"),
             QRegularExpression::CaseInsensitiveOption);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
         if (kOpaqueScheme.matchView(activePrefix).hasMatch()) {
+#else
+        if (kOpaqueScheme.match(activePrefix).hasMatch()) {
+#endif
             return true;
         }
     }

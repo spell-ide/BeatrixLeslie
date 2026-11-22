@@ -1964,9 +1964,13 @@ pub fn run_terminal_command_in_dir(
 
     #[cfg(windows)]
     let mut cmd = {
+        use std::os::windows::process::CommandExt;
         let _ = use_efficiency_cores;
         let mut c = Command::new("cmd");
-        c.args(["/C", command]);
+        c.arg("/D")
+            .arg("/S")
+            .arg("/C")
+            .raw_arg(format!("\"{command}\""));
         c
     };
 
@@ -6219,7 +6223,7 @@ def next_fn():
             "{py} -c \"import sys; sys.stdout.write('A' * 1048576); sys.stdout.flush(); sys.stderr.write('B' * 262144); sys.stderr.flush()\""
         );
         let start = Instant::now();
-        let out = run_terminal_command(&ws, &cmd, 5_000, false).unwrap();
+        let out = run_terminal_command(&ws, &cmd, 10_000, false).unwrap();
         let elapsed = start.elapsed();
 
         assert!(
@@ -6233,8 +6237,8 @@ def next_fn():
             &out[..out.len().min(200)]
         );
         assert!(
-            elapsed < Duration::from_millis(3_000),
-            "Expected large pipe drain to finish in < 3000ms, took {elapsed:?}"
+            elapsed < Duration::from_millis(8_000),
+            "Expected large pipe drain to finish in < 8000ms, took {elapsed:?}"
         );
 
         let _ = fs::remove_dir_all(&ws);

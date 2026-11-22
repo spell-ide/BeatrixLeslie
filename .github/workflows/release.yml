@@ -35,6 +35,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust/spell_core
+          cache-on-failure: true
 
       - name: Verify third-party license notices
         run: python3 scripts/generate_third_party_licenses.py --check
@@ -85,6 +86,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust/spell_core
+          cache-on-failure: true
 
       - name: Verify third-party license notices
         run: python3 scripts/generate_third_party_licenses.py --check
@@ -125,6 +127,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust/spell_core
+          cache-on-failure: true
 
       - name: Install Qt 6
         uses: jurplel/install-qt-action@v4
@@ -132,10 +135,34 @@ jobs:
           version: '6.7.*'
           cache: true
 
+      - name: Cache QScintilla 2.14.1 (Windows MSVC)
+        id: qsci-cache
+        uses: actions/cache@v4
+        with:
+          path: C:\qscintilla-cache
+          key: qscintilla-2.14.1-qt6.7-msvc-x64-v1
+
       - name: Build and install QScintilla 2.14.1
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+          $CacheDir = "C:\qscintilla-cache"
+          $QtLibDir = (& qmake -query QT_INSTALL_LIBS).Trim()
+          $QtBinDir = (& qmake -query QT_INSTALL_BINS).Trim()
+          $QtIncDir = (& qmake -query QT_INSTALL_HEADERS).Trim()
+
+          if ("${{ steps.qsci-cache.outputs.cache-hit }}" -eq "true" -and
+              (Test-Path -LiteralPath (Join-Path $CacheDir "qscintilla2_qt6.lib")) -and
+              (Test-Path -LiteralPath (Join-Path $CacheDir "qscintilla2_qt6.dll")) -and
+              (Test-Path -LiteralPath (Join-Path $CacheDir "Qsci\qsciscintilla.h"))) {
+              Write-Host "==> Restoring prebuilt QScintilla 2.14.1 from cache"
+              Copy-Item -LiteralPath (Join-Path $CacheDir "qscintilla2_qt6.lib") -Destination (Join-Path $QtLibDir "qscintilla2_qt6.lib") -Force
+              Copy-Item -LiteralPath (Join-Path $CacheDir "qscintilla2_qt6.dll") -Destination (Join-Path $QtLibDir "qscintilla2_qt6.dll") -Force
+              Copy-Item -LiteralPath (Join-Path $CacheDir "qscintilla2_qt6.dll") -Destination (Join-Path $QtBinDir "qscintilla2_qt6.dll") -Force
+              Copy-Item -LiteralPath (Join-Path $CacheDir "Qsci") -Destination $QtIncDir -Recurse -Force
+              exit 0
+          }
+
           $ExpectedSha256 = "dfe13c6acc9d85dfcba76ccc8061e71a223957a6c02f3c343b30a9d43a4cdd4d"
           $Urls = @(
               "https://www.riverbankcomputing.com/static/Downloads/QScintilla/2.14.1/QScintilla_src-2.14.1.tar.gz",
@@ -173,8 +200,6 @@ jobs:
 
           $SrcDirCand = Get-ChildItem -Path $WorkDir -Directory | Select-Object -First 1
           $QsciSrcDir = Join-Path $SrcDirCand.FullName "src"
-          $QtLibDir = (& qmake -query QT_INSTALL_LIBS).Trim()
-          $QtBinDir = (& qmake -query QT_INSTALL_BINS).Trim()
 
           Push-Location $QsciSrcDir
           try {
@@ -187,10 +212,14 @@ jobs:
               & nmake install
               if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+              New-Item -ItemType Directory -Path $CacheDir -Force | Out-Null
+              Copy-Item -LiteralPath (Join-Path $QsciSrcDir "Qsci") -Destination $CacheDir -Recurse -Force
+
               foreach ($BuiltLib in @(Get-ChildItem -Path $QsciSrcDir -Recurse -Filter "qscintilla2_qt6.lib" -File -ErrorAction SilentlyContinue)) {
                   if ($QtLibDir -and (Test-Path -LiteralPath $QtLibDir)) {
                       Copy-Item -LiteralPath $BuiltLib.FullName -Destination (Join-Path $QtLibDir "qscintilla2_qt6.lib") -Force
                   }
+                  Copy-Item -LiteralPath $BuiltLib.FullName -Destination (Join-Path $CacheDir "qscintilla2_qt6.lib") -Force
               }
               foreach ($BuiltDll in @(Get-ChildItem -Path $QsciSrcDir -Recurse -Filter "qscintilla2_qt6.dll" -File -ErrorAction SilentlyContinue)) {
                   if ($QtLibDir -and (Test-Path -LiteralPath $QtLibDir)) {
@@ -199,6 +228,7 @@ jobs:
                   if ($QtBinDir -and (Test-Path -LiteralPath $QtBinDir)) {
                       Copy-Item -LiteralPath $BuiltDll.FullName -Destination (Join-Path $QtBinDir "qscintilla2_qt6.dll") -Force
                   }
+                  Copy-Item -LiteralPath $BuiltDll.FullName -Destination (Join-Path $CacheDir "qscintilla2_qt6.dll") -Force
               }
           } finally {
               Pop-Location

@@ -146,8 +146,8 @@ endif()
 
 get_filename_component(QSCINTILLA_LIB_DIR "${QSCINTILLA_LIBRARY}" DIRECTORY)
 
-set(QSCINTILLA_RUNTIME_DLL "")
 if(WIN32)
+    unset(QSCINTILLA_RUNTIME_DLL)
     find_file(QSCINTILLA_RUNTIME_DLL
         NAMES
             qscintilla2_qt6.dll

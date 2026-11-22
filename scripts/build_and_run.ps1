@@ -65,8 +65,32 @@ function Invoke-WinDeployQtOnTarget {
     param([string]$WinDeployQtExe, [string]$TargetExe, [string]$Config)
     $ModeFlag = if ($Config -eq "Debug") { "--debug" } else { "--release" }
     $TargetDir = Split-Path -Parent $TargetExe
-    $DeployInputs = @($TargetExe)
     $QsciDlls = @(Get-ChildItem -Path $TargetDir -Filter "qscintilla2*.dll" -File -ErrorAction SilentlyContinue)
+    if ($QsciDlls.Count -eq 0) {
+        $WinDeployBinDir = Split-Path -Parent $WinDeployQtExe
+        $WinDeployRootDir = Split-Path -Parent $WinDeployBinDir
+        $SearchDirs = @(
+            $WinDeployBinDir,
+            (Join-Path $WinDeployRootDir "lib")
+        )
+        foreach ($EnvPrefix in @($env:Qt6_DIR, $env:QT_ROOT_DIR)) {
+            if (-not [string]::IsNullOrWhiteSpace($EnvPrefix)) {
+                $SearchDirs += (Join-Path $EnvPrefix "bin")
+                $SearchDirs += (Join-Path $EnvPrefix "lib")
+            }
+        }
+        foreach ($SearchDir in $SearchDirs) {
+            if (Test-Path -LiteralPath $SearchDir -PathType Container) {
+                $FoundQsci = @(Get-ChildItem -Path $SearchDir -Filter "qscintilla2*.dll" -File -ErrorAction SilentlyContinue)
+                if ($FoundQsci.Count -gt 0) {
+                    Copy-Item -LiteralPath $FoundQsci[0].FullName -Destination (Join-Path $TargetDir $FoundQsci[0].Name) -Force
+                    $QsciDlls = @(Get-ChildItem -Path $TargetDir -Filter "qscintilla2*.dll" -File -ErrorAction SilentlyContinue)
+                    break
+                }
+            }
+        }
+    }
+    $DeployInputs = @($TargetExe)
     foreach ($QsciDll in $QsciDlls) {
         $DeployInputs += $QsciDll.FullName
     }
@@ -170,8 +194,9 @@ if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
 
-Write-Host "==> Building BeatrixLeslie IDE ($Configuration)"
-& cmake --build $ResolvedBuildDir --config $Configuration --parallel
+$ParallelJobs = [Math]::Max(1, [Environment]::ProcessorCount)
+Write-Host "==> Building BeatrixLeslie IDE ($Configuration, parallel jobs: $ParallelJobs)"
+& cmake --build $ResolvedBuildDir --config $Configuration --parallel $ParallelJobs
 if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }

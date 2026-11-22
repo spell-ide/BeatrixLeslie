@@ -114,13 +114,44 @@ done
 RESOLVED_BUILD_DIR="$(resolve_path "${BUILD_DIR}")"
 OS_NAME="$(uname -s)"
 
+detect_parallel_jobs() {
+    local cpus=4
+    if command -v nproc >/dev/null 2>&1; then
+        cpus="$(nproc)"
+    elif command -v sysctl >/dev/null 2>&1; then
+        cpus="$(sysctl -n hw.logicalcpu 2>/dev/null || echo 4)"
+    fi
+    if [[ ! "${cpus}" =~ ^[0-9]+$ || "${cpus}" -lt 1 ]]; then
+        cpus=4
+    fi
+    # On Linux, cap C++20/Qt6 compilation jobs to ~2 GB RAM per compiler process
+    # so machines and CI runners never OOM or thrash swap (bare `cmake --build --parallel`
+    # passes unbounded `-j` to GNU Make).
+    if [[ -r /proc/meminfo ]]; then
+        local mem_kb
+        mem_kb="$(awk '/^MemTotal:/ {print $2; exit}' /proc/meminfo 2>/dev/null || echo 0)"
+        if [[ "${mem_kb}" =~ ^[0-9]+$ && "${mem_kb}" -gt 0 ]]; then
+            local max_by_ram=$(( mem_kb / 2097152 ))
+            if [[ "${max_by_ram}" -lt 1 ]]; then
+                max_by_ram=1
+            fi
+            if [[ "${cpus}" -gt "${max_by_ram}" ]]; then
+                cpus="${max_by_ram}"
+            fi
+        fi
+    fi
+    printf '%s\n' "${cpus}"
+}
+
+PARALLEL_JOBS="$(detect_parallel_jobs)"
+
 echo "==> Configuring BeatrixLeslie IDE (${BUILD_TYPE}) in ${RESOLVED_BUILD_DIR}"
 cmake -S "${ROOT_DIR}" -B "${RESOLVED_BUILD_DIR}" \
     -DCMAKE_BUILD_TYPE="${BUILD_TYPE}" \
     -DSPELL_BUILD_RUST=ON
 
-echo "==> Building BeatrixLeslie IDE"
-cmake --build "${RESOLVED_BUILD_DIR}" --config "${BUILD_TYPE}" --parallel
+echo "==> Building BeatrixLeslie IDE (parallel jobs: ${PARALLEL_JOBS})"
+cmake --build "${RESOLVED_BUILD_DIR}" --config "${BUILD_TYPE}" --parallel "${PARALLEL_JOBS}"
 
 if [[ "${RUN_TESTS}" -eq 1 ]]; then
     echo "==> Running spell_core Rust tests (SPELL_EPHEMERAL_KEYRING=1)"
